@@ -1,9 +1,12 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { useCapacity } from '../context/CapacityContext';
 import {
   departmentTrend, trainingImpactData
 } from '../data/mockData';
+import { users as demoUsers, courses as demoCourses, enrollments as demoEnrollments, certificates as demoCertificates, competenciesByUser as demoCompetencies, departments as demoDepartments } from '../data/mockData';
+import { isSupabaseConfigured, supabase } from '../lib/supabase';
+import { getPlatformStats, type PlatformStats } from '../lib/metrics';
 import { StatCard, SectionHeader, ScorePill } from '../components/ui/SharedComponents';
 import {
   BarChart3, TrendingUp, Building2, Award, Download,
@@ -19,13 +22,54 @@ export default function OrgAnalyticsPage() {
   const { user } = useAuth();
   const { departments, isLoopCompleted } = useCapacity();
   const [timeRange, setTimeRange] = useState<'6m' | '1y' | 'all'>('6m');
+  const [platformStats, setPlatformStats] = useState<PlatformStats | null>(null);
+  const demoMode = Boolean(localStorage.getItem('capacity_connect_demo_user'));
+
+  useEffect(() => {
+    async function loadStats() {
+      if (demoMode) {
+        setPlatformStats(getPlatformStats({
+          users: demoUsers,
+          courses: demoCourses,
+          enrollments: demoEnrollments,
+          certificates: demoCertificates,
+          competencies: Object.entries(demoCompetencies).flatMap(([userId, competencies]) => competencies.map(competency => ({ ...competency, userId }))),
+          departments: demoDepartments,
+        }));
+        return;
+      }
+      if (!supabase || !isSupabaseConfigured) return;
+      const [{ data: profiles }, { data: courses }, { data: enrollments }, { data: certificates }, { data: attempts }, { data: userCompetencies }, { data: definitions }] = await Promise.all([
+        supabase.from('profiles').select('id, role, department'),
+        supabase.from('courses').select('id'),
+        supabase.from('enrollments').select('user_id, course_id, completed_at'),
+        supabase.from('certificates').select('user_id, verification_status'),
+        supabase.from('quiz_attempts').select('user_id, score'),
+        supabase.from('user_competencies').select('user_id, competency_id, current_score, required_score'),
+        supabase.from('competencies').select('id, default_required'),
+      ]);
+      const users = (profiles || []).map(profile => ({ id: profile.id, role: profile.role as 'learner' | 'manager' | 'admin', department: profile.department }));
+      setPlatformStats(getPlatformStats({
+        users,
+        courses: (courses || []).map(course => ({ id: String(course.id) })),
+        enrollments: (enrollments || []).map(enrollment => ({ userId: enrollment.user_id, courseId: String(enrollment.course_id), progress: enrollment.completed_at ? 100 : 0, completedAt: enrollment.completed_at || undefined })),
+        certificates: (certificates || []).map(certificate => ({ userId: certificate.user_id, verificationStatus: certificate.verification_status })),
+        competencies: [
+          ...(userCompetencies || []).map(item => ({ id: item.competency_id, userId: item.user_id, current: item.current_score, required: item.required_score })),
+          ...(definitions || []).map(item => ({ id: item.id, userId: '', current: 0, required: item.default_required })),
+        ],
+        departments: Array.from(new Set(users.map(user => user.department).filter(Boolean))).map(name => ({ id: name, name })),
+        attempts: (attempts || []).map(attempt => ({ userId: attempt.user_id, score: attempt.score })),
+      }));
+    }
+    void loadStats();
+  }, [demoMode]);
 
   if (!user) return null;
 
-  // Compute live enterprise capability average across departments
-  const enterpriseCapabilityAvg = (
-    departments.reduce((s, d) => s + d.capabilityScore, 0) / Math.max(departments.length, 1)
-  ).toFixed(1);
+  const enterpriseCapability = platformStats?.capability;
+  const displayMetric = (value: number | null, suffix = '') => value === null || value === 0 ? 'No data available yet' : `${value}${suffix}`;
+  const visibleDepartments = demoMode ? departments : [];
 
   return (
     <div className="p-6 md:p-8 max-w-7xl mx-auto animate-fade-in space-y-8">
@@ -71,6 +115,7 @@ export default function OrgAnalyticsPage() {
       </div>
 
       {/* Closed Loop Notification for Director */}
+      {demoMode && <div className="bg-amber-50 border border-amber-200 rounded-2xl px-4 py-3 text-xs font-semibold text-amber-900">DEMO / SAMPLE DATA: Analytics are calculated from the shared Capacity Connect demo records.</div>}
       {isLoopCompleted && (
         <div className="bg-emerald-50 border border-emerald-300 rounded-2xl p-4 flex items-start gap-3">
           <CheckCircle2 size={20} className="text-emerald-700 flex-shrink-0 mt-0.5" />
@@ -79,7 +124,7 @@ export default function OrgAnalyticsPage() {
               Executive Impact: Closed-Loop Capability Lift Detected
             </p>
             <p className="text-xs text-emerald-800 mt-0.5 leading-relaxed">
-              Arjun Sharma’s verified assessment completion has updated the Engineering capability index to <strong>88%</strong>, lifting the National Enterprise Capability Index to <strong>{enterpriseCapabilityAvg}%</strong>.
+              Verified assessment activity is reflected in the shared capability and completion calculations used across the portal.
             </p>
           </div>
         </div>
@@ -89,8 +134,8 @@ export default function OrgAnalyticsPage() {
       <div className="grid grid-cols-2 md:grid-cols-4 gap-5">
         <StatCard
           label="Enterprise Capability Index"
-          value={`${enterpriseCapabilityAvg}%`}
-          sub="Target baseline: 75.0%"
+          value={displayMetric(enterpriseCapability ?? null, '%')}
+          sub="Calculated from competency records"
           icon={<BarChart3 size={20} />}
           color="blue"
           trend={isLoopCompleted ? 7.4 : 5.2}
@@ -98,16 +143,16 @@ export default function OrgAnalyticsPage() {
         />
         <StatCard
           label="Personnel Monitored"
-          value="175"
-          sub="Across 5 Divisions"
+          value={displayMetric(platformStats?.totalUsers || null)}
+          sub="Users in the selected data source"
           icon={<Building2 size={20} />}
           color="teal"
           badge="Civil Servants"
         />
         <StatCard
           label="Training Capability Lift"
-          value="+21.4%"
-          sub="Pre vs Post training evaluation"
+          value={displayMetric(platformStats?.completionRate || null, '%')}
+          sub="Course completion rate"
           icon={<TrendingUp size={20} />}
           color="green"
           trend={14}
@@ -115,8 +160,8 @@ export default function OrgAnalyticsPage() {
         />
         <StatCard
           label="Accredited Certificates"
-          value={isLoopCompleted ? '407' : '406'}
-          sub="Cryptographically signed"
+          value={displayMetric(platformStats?.certificates || null)}
+          sub="Valid certificates"
           icon={<Award size={20} />}
           color="gold"
           badge="GoI Ledger"
@@ -133,7 +178,7 @@ export default function OrgAnalyticsPage() {
             subtitle="Monthly capability index tracking across ministries & divisions"
           />
           <div className="h-72">
-            <ResponsiveContainer width="100%" height="100%">
+            {demoMode ? <ResponsiveContainer width="100%" height="100%">
               <LineChart data={departmentTrend} margin={{ top: 10, right: 15, left: -20, bottom: 0 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
                 <XAxis dataKey="month" tick={{ fontSize: 11, fill: '#64748b' }} />
@@ -148,7 +193,7 @@ export default function OrgAnalyticsPage() {
                 <Line type="monotone" dataKey="Operations" stroke="#ff9933" strokeWidth={2} />
                 <Line type="monotone" dataKey="Finance" stroke="#ef4444" strokeWidth={3} dot={{ r: 4 }} />
               </LineChart>
-            </ResponsiveContainer>
+            </ResponsiveContainer> : <p className="h-full flex items-center justify-center text-xs text-slate-500">No platform analytics data yet.</p>}
           </div>
         </div>
 
@@ -160,7 +205,7 @@ export default function OrgAnalyticsPage() {
             subtitle="Pre-training vs Post-training proctored competency scores"
           />
           <div className="h-72">
-            <ResponsiveContainer width="100%" height="100%">
+            {demoMode ? <ResponsiveContainer width="100%" height="100%">
               <BarChart data={trainingImpactData} margin={{ top: 10, right: 15, left: -20, bottom: 0 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
                 <XAxis dataKey="competency" tick={{ fontSize: 10, fill: '#64748b' }} />
@@ -176,7 +221,7 @@ export default function OrgAnalyticsPage() {
                 <Bar dataKey="before" fill="#cbd5e1" radius={[4, 4, 0, 0]} />
                 <Bar dataKey="after" fill="#138808" radius={[4, 4, 0, 0]} />
               </BarChart>
-            </ResponsiveContainer>
+            </ResponsiveContainer> : <p className="h-full flex items-center justify-center text-xs text-slate-500">No training impact data yet.</p>}
           </div>
         </div>
       </div>
@@ -200,7 +245,8 @@ export default function OrgAnalyticsPage() {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100 text-sm">
-              {departments.map(dept => {
+              {visibleDepartments.length === 0 && <tr><td colSpan={5} className="py-8 text-center text-xs text-slate-500">No divisional data available yet.</td></tr>}
+              {visibleDepartments.map(dept => {
                 const isCritical = dept.criticalGap;
 
                 return (

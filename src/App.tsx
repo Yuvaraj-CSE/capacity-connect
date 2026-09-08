@@ -20,16 +20,20 @@ import OrgAnalyticsPage from './pages/OrgAnalyticsPage';
 import AlertsPage from './pages/AlertsPage';
 import AdminPage from './pages/AdminPage';
 import ManagerPage from './pages/ManagerPage';
+import ProfilePage from './pages/ProfilePage';
 import CertificateVerificationPage from './pages/CertificateVerificationPage';
 
 function ProtectedLayout({ children, roles }: { children: React.ReactNode; roles?: Array<'learner' | 'manager' | 'admin'> }) {
-  const { user } = useAuth();
+  const { user, loading } = useAuth();
   const { ensureUserProfile } = useCapacity();
 
   useEffect(() => {
     if (user) ensureUserProfile(user.id);
   }, [user, ensureUserProfile]);
 
+  if (loading) {
+    return null;
+  }
   if (!user) {
     return <Navigate to="/login" replace />;
   }
@@ -82,7 +86,9 @@ export default function App() {
             <Route path="/team" element={<ProtectedLayout roles={['manager', 'admin']}><TeamAnalyticsPage /></ProtectedLayout>} />
             <Route path="/analytics" element={<ProtectedLayout roles={['manager', 'admin']}><OrgAnalyticsPage /></ProtectedLayout>} />
             <Route path="/alerts" element={<ProtectedLayout roles={['manager', 'admin']}><AlertsPage /></ProtectedLayout>} />
-            <Route path="/manager" element={<ProtectedLayout roles={['manager', 'admin']}><ManagerPage /></ProtectedLayout>} />
+            <Route path="/manager" element={<ProtectedLayout roles={['manager', 'admin']}><TeamAnalyticsPage /></ProtectedLayout>} />
+            <Route path="/manager/content" element={<ProtectedLayout roles={['manager', 'admin']}><ManagerPage /></ProtectedLayout>} />
+            <Route path="/profile" element={<ProtectedLayout roles={['manager', 'admin']}><ProfilePage /></ProtectedLayout>} />
             <Route path="/admin" element={<ProtectedLayout roles={['admin']}><AdminPage /></ProtectedLayout>} />
 
             {/* Fallback */}

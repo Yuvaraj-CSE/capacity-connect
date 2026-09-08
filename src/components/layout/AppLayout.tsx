@@ -8,25 +8,32 @@ import {
   LayoutDashboard, Brain, BookOpen, Map, Library,
   BarChart3, Users, Settings, LogOut, ChevronRight,
   Shield, Target, ChevronDown, CheckCircle2, RotateCcw,
-  Sparkles, ArrowRight
+  Sparkles, ArrowRight, UserCircle
 } from 'lucide-react';
 
 interface NavItem {
   to: string;
   icon: React.ReactNode;
-  translationKey: string;
+  translationKey?: string;
+  label?: string;
   roles: string[];
 }
 
 const navItems: NavItem[] = [
   { to: '/dashboard',   icon: <LayoutDashboard size={18} />, translationKey: 'navigation.dashboard',          roles: ['learner'] },
-  { to: '/competency',  icon: <Brain size={18} />,           translationKey: 'navigation.competencyProfile',   roles: ['learner', 'manager', 'admin'] },
-  { to: '/learning',    icon: <Map size={18} />,             translationKey: 'navigation.capabilityJourney',   roles: ['learner', 'manager', 'admin'] },
-  { to: '/manager',     icon: <Settings size={18} />,        translationKey: 'navigation.courseCatalogue',     roles: ['manager', 'admin'] },
-  { to: '/courses',     icon: <BookOpen size={18} />,        translationKey: 'navigation.courseCatalogue',     roles: ['learner', 'manager', 'admin'] },
-  { to: '/knowledge',   icon: <Library size={18} />,         translationKey: 'navigation.knowledgeHub',        roles: ['learner', 'manager', 'admin'] },
+  { to: '/competency',  icon: <Brain size={18} />,           translationKey: 'navigation.competencyProfile',   roles: ['learner'] },
+  { to: '/learning',    icon: <Map size={18} />,             translationKey: 'navigation.capabilityJourney',   roles: ['learner'] },
+  { to: '/courses',     icon: <BookOpen size={18} />,        translationKey: 'navigation.courseCatalogue',     roles: ['learner'] },
+  { to: '/knowledge',   icon: <Library size={18} />,         translationKey: 'navigation.knowledgeHub',        roles: ['learner'] },
   { to: '/assessments', icon: <Target size={18} />,          translationKey: 'navigation.assessments',         roles: ['learner'] },
-  { to: '/team',        icon: <Users size={18} />,           translationKey: 'navigation.teamAnalytics',       roles: ['manager', 'admin'] },
+  { to: '/manager',     icon: <LayoutDashboard size={18} />, label: 'Dashboard',                               roles: ['manager'] },
+  { to: '/team',        icon: <Users size={18} />,           label: 'My Team',                                 roles: ['manager'] },
+  { to: '/manager#skill-gaps', icon: <Target size={18} />,  label: 'Skill Gaps',                              roles: ['manager'] },
+  { to: '/courses',     icon: <BookOpen size={18} />,        label: 'Learning Assignments',                    roles: ['manager'] },
+  { to: '/manager#progress', icon: <Map size={18} />,        label: 'Team Progress',                           roles: ['manager'] },
+  { to: '/manager#competency', icon: <Brain size={18} />,    label: 'Competency',                              roles: ['manager'] },
+  { to: '/profile',     icon: <UserCircle size={18} />,      label: 'Profile',                                roles: ['manager'] },
+  { to: '/team',        icon: <Users size={18} />,           translationKey: 'navigation.teamAnalytics',       roles: ['admin'] },
   { to: '/analytics',   icon: <BarChart3 size={18} />,       translationKey: 'navigation.orgAnalytics',        roles: ['admin', 'manager'] },
   { to: '/alerts',      icon: <Shield size={18} />,          translationKey: 'navigation.capabilityAlerts',    roles: ['manager', 'admin'] },
   { to: '/admin',       icon: <Settings size={18} />,        translationKey: 'navigation.administration',      roles: ['admin'] },
@@ -103,7 +110,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
                 <span className="flex-shrink-0">{item.icon}</span>
                 {sidebarOpen && (
                   <div className="flex items-center justify-between flex-1 truncate">
-                    <span>{t(item.translationKey)}</span>
+                    <span>{item.label || t(item.translationKey || '')}</span>
                     {item.to === '/alerts' && (
                       <span className="w-2 h-2 rounded-full bg-red-500 animate-ping" />
                     )}
@@ -154,7 +161,10 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
                         key={role}
                         onClick={() => {
                           void switchRole(role).then(changed => {
-                            if (changed) { setShowRoleSwitcher(false); navigate('/dashboard'); }
+                            if (changed) {
+                              setShowRoleSwitcher(false);
+                              navigate(role === 'admin' ? '/admin' : role === 'manager' ? '/manager' : '/dashboard');
+                            }
                           });
                         }}
                         className={`w-full text-left px-3 py-2 rounded-xl text-xs transition-colors flex items-center justify-between ${

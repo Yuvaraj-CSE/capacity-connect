@@ -2,6 +2,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useCapacity } from '../context/CapacityContext';
 import { courses } from '../data/mockData';
+import { getLearnerStats } from '../lib/metrics';
 import { StatCard, CircularScore, ProgressBar, SectionHeader, Avatar, OfficialCertificate } from '../components/ui/SharedComponents';
 import {
   Brain, BookOpen, Award, ArrowRight,
@@ -21,7 +22,7 @@ function getHour(): string {
 
 export default function DashboardPage() {
   const { user } = useAuth();
-  const { competenciesByUser, enrollments, certificates } = useCapacity();
+  const { competenciesByUser, enrollments, certificates, learningProgress } = useCapacity();
   const navigate = useNavigate();
   const [showCertModal, setShowCertModal] = useState(false);
 
@@ -30,6 +31,15 @@ export default function DashboardPage() {
   const comps = competenciesByUser[user.id] || [];
   const userEnrollments = enrollments.filter(e => e.userId === user.id);
   const userCerts = certificates.filter(c => c.userId === user.id);
+  const learnerProgress = learningProgress.filter(progress => progress.userId === user.id);
+  const learnerStats = getLearnerStats({
+    userId: user.id,
+    enrollments: userEnrollments,
+    competencies: comps,
+    certificates: userCerts,
+    quizCount: learnerProgress.reduce((sum, progress) => sum + progress.quizAttempts.length, 0),
+    assignmentCount: learnerProgress.reduce((sum, progress) => sum + progress.assignmentSubmissions.length, 0),
+  });
 
   // Dynamic capability score calculation
   const capabilityScore = comps.length
@@ -46,7 +56,8 @@ export default function DashboardPage() {
     .sort((a, b) => (b.required - b.current) - (a.required - a.current));
 
   const dataAnalyticsComp = comps.find(c => c.id === 'c2');
-  const isDataGapResolved = (dataAnalyticsComp?.current ?? 0) >= (dataAnalyticsComp?.required ?? 75);
+  const roleBenchmark = comps.length ? Math.round(comps.reduce((sum, competency) => sum + competency.required, 0) / comps.length) : null;
+  const isDataGapResolved = dataAnalyticsComp ? dataAnalyticsComp.current >= dataAnalyticsComp.required : false;
 
   const radarData = comps.map(c => ({
     subject: c.name.length > 12 ? c.name.split(' ')[0] : c.name,
@@ -82,7 +93,12 @@ export default function DashboardPage() {
       </div>
 
       {/* 2. Priority Closed-Loop Action Banner */}
-      {!isDataGapResolved ? (
+      {!dataAnalyticsComp ? (
+        <div className="bg-slate-100 rounded-3xl p-6 text-slate-700 border border-slate-200">
+          <h3 className="text-lg font-bold text-slate-900">No personal competency data yet</h3>
+          <p className="text-xs mt-1">Complete a competency assessment when data becomes available to see your learning priorities.</p>
+        </div>
+      ) : !isDataGapResolved ? (
         <div className="bg-gradient-to-r from-[#0b2545] via-[#13315c] to-[#0b2545] rounded-3xl p-6 text-white border-2 border-[#ff9933]/60 shadow-lg flex flex-col lg:flex-row items-center justify-between gap-6 relative overflow-hidden">
           <div className="flex items-start gap-4">
             <div className="w-12 h-12 rounded-2xl bg-[#ff9933]/20 border border-[#ff9933]/40 flex items-center justify-center text-[#ff9933] flex-shrink-0 mt-1">
@@ -93,13 +109,13 @@ export default function DashboardPage() {
                 <span className="text-[10px] font-black uppercase tracking-wider px-2.5 py-0.5 rounded-full bg-red-500/20 text-red-300 border border-red-500/40">
                   Priority Action Required
                 </span>
-                <span className="text-xs text-amber-300 font-bold">FRAC Benchmark Deficit: −33 pts</span>
+                <span className="text-xs text-amber-300 font-bold">FRAC Benchmark Deficit: −{(dataAnalyticsComp?.required || 0) - (dataAnalyticsComp?.current || 0)} pts</span>
               </div>
               <h3 className="text-xl font-bold text-white mt-1">
                 Data Analytics Competency Deficit Detected
               </h3>
               <p className="text-xs text-slate-300 mt-1 leading-relaxed max-w-2xl">
-                Your current score is <strong className="text-white">42%</strong> vs role benchmark of <strong className="text-white">75%</strong>. Complete the prescribed learning modules and clear the proctored assessment to upgrade your competency.
+                Your current score is <strong className="text-white">{dataAnalyticsComp?.current || 0}%</strong> vs role benchmark of <strong className="text-white">{dataAnalyticsComp?.required || 0}%</strong>. Complete the prescribed learning modules and clear the proctored assessment to upgrade your competency.
               </p>
             </div>
           </div>
@@ -132,7 +148,7 @@ export default function DashboardPage() {
                 <span className="text-[10px] font-black uppercase tracking-wider px-2.5 py-0.5 rounded-full bg-emerald-400/20 text-emerald-300 border border-emerald-400/40">
                   Closed-Loop Cycle Complete
                 </span>
-                <span className="text-xs text-emerald-300 font-bold">Target Exceeded: 85% Verified ✓</span>
+                <span className="text-xs text-emerald-300 font-bold">Target Met: {dataAnalyticsComp?.current || 0}% Verified ✓</span>
               </div>
               <h3 className="text-xl font-bold text-white mt-1">
                 Data Analytics Competency Accredited
@@ -156,27 +172,24 @@ export default function DashboardPage() {
       {/* 3. High-Impact Government Stat Cards */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-5">
         <StatCard
-          label="National Capability Index"
-          value={`${capabilityScore}%`}
-          sub="Role Target: 75% required"
+          label="My Capability Index"
+          value={learnerStats.capability === null ? 'No data yet' : `${learnerStats.capability}%`}
+          sub="Calculated from my competencies"
           icon={<Brain size={20} />}
           color="blue"
-          trend={isDataGapResolved ? 12 : 4}
           badge="FRAC Tier II"
         />
         <StatCard
           label="Learning Completion"
-          value={`${Math.round(
-            userEnrollments.reduce((s, e) => s + e.progress, 0) / Math.max(userEnrollments.length, 1)
-          )}%`}
-          sub={`${userEnrollments.filter(e => e.progress === 100).length} modules completed`}
+          value={learnerStats.myProgress === null ? 'No data yet' : `${learnerStats.myProgress}%`}
+          sub={`${userEnrollments.filter(e => e.progress === 100).length} courses completed`}
           icon={<BookOpen size={20} />}
           color="teal"
           badge="iGOT Aligned"
         />
         <StatCard
           label="Remaining Skill Gaps"
-          value={gaps.length}
+          value={comps.length === 0 ? 'No data yet' : learnerStats.skillGaps}
           sub={gaps.length > 0 ? `Priority: ${gaps[0]?.name}` : 'All targets achieved!'}
           icon={<Target size={20} />}
           color={gaps.length > 2 ? 'red' : gaps.length > 0 ? 'saffron' : 'green'}
@@ -184,7 +197,7 @@ export default function DashboardPage() {
         />
         <StatCard
           label="Verified Credentials"
-          value={userCerts.length}
+          value={learnerStats.myCertificates}
           sub="Government signed"
           icon={<Award size={20} />}
           color="gold"
@@ -248,9 +261,9 @@ export default function DashboardPage() {
             <p className="text-[#ff9933] text-[11px] font-bold mt-3 uppercase tracking-wider">
               Composite Readiness Index
             </p>
-            <p className="text-xs text-slate-300 mt-0.5">Civil Services Benchmark: 75%</p>
+            <p className="text-xs text-slate-300 mt-0.5">Average role benchmark: {roleBenchmark === null ? 'No data yet' : `${roleBenchmark}%`}</p>
             <div className="mt-4 w-full bg-white/10 rounded-2xl px-4 py-2.5 text-xs text-amber-200 font-semibold border border-white/10">
-              {isDataGapResolved ? '✓ Target Met! Readiness Lift: +12%' : 'Active remediation in progress 🎯'}
+              {isDataGapResolved ? '✓ Data Analytics target met' : 'Active remediation in progress 🎯'}
             </div>
           </div>
 
@@ -370,7 +383,7 @@ export default function DashboardPage() {
           title="Certified Data Analytics Specialist"
           recipientName={user.name}
           recipientPosition={user.position}
-          score={dataAnalyticsComp?.current || 85}
+              score={dataAnalyticsComp?.current || 0}
           issuedDate={new Date().toISOString().slice(0, 10)}
           uid={`GOI-CBC-${Date.now().toString().slice(-6)}`}
           onClose={() => setShowCertModal(false)}

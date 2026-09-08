@@ -46,11 +46,13 @@ const FRAC_PILLARS = [
   },
 ];
 
-const NATIONAL_STATS = [
-  { label: 'Civil Servants & Staff Tracked', labelHi: 'प्रशिक्षित लोकसेवक', value: '1,42,800+', change: '+18.4% YoY' },
-  { label: 'National Competencies Indexed', labelHi: 'दक्षताएं पंजीकृत', value: '480+', change: 'FRAC Aligned' },
-  { label: 'Capability Score Average', labelHi: 'राष्ट्रीय क्षमता सूचकांक', value: '74.2%', change: '+5.2% Lift' },
-  { label: 'Gaps Closed Through Learning', labelHi: 'समाधानित अंतराल', value: '18,940', change: '94% Pass Rate' },
+const PLATFORM_CAPABILITIES = [
+  'Structured Multi-Week Learning',
+  'Competency-Based Development',
+  'Team Skill-Gap Analysis',
+  'AI-Assisted Learning',
+  'Knowledge Sharing',
+  'Role-Based Capacity Building',
 ];
 
 export default function LandingPage() {
@@ -141,19 +143,11 @@ export default function LandingPage() {
           </div>
         </div>
 
-        {/* 4. National Statistics Banner */}
-        <div className="max-w-6xl mx-auto mt-16 grid grid-cols-2 md:grid-cols-4 gap-4 relative z-10">
-          {NATIONAL_STATS.map((stat, idx) => (
-            <div
-              key={idx}
-              className="bg-white/10 backdrop-blur-md rounded-2xl p-5 border border-white/10 text-left hover:border-amber-300/40 transition-colors"
-            >
-              <p className="text-[10px] font-bold text-amber-300/90 uppercase tracking-wider">{stat.labelHi}</p>
-              <p className="text-3xl font-black text-white mt-1 tracking-tight">{stat.value}</p>
-              <p className="text-xs text-slate-300 mt-1 font-medium">{stat.label}</p>
-              <p className="text-[10px] text-emerald-400 font-bold mt-2 flex items-center gap-1">
-                <span>{stat.change}</span>
-              </p>
+        {/* 4. Platform Capability Areas */}
+        <div className="max-w-6xl mx-auto mt-16 grid grid-cols-2 md:grid-cols-3 gap-3 relative z-10">
+          {PLATFORM_CAPABILITIES.map(capability => (
+            <div key={capability} className="bg-white/10 backdrop-blur-md rounded-2xl px-4 py-3 border border-white/10 text-center hover:border-amber-300/40 transition-colors">
+              <p className="text-xs font-bold text-white">{capability}</p>
             </div>
           ))}
         </div>
@@ -200,7 +194,7 @@ export default function LandingPage() {
             {
               step: '04',
               title: 'Verified Competency Boost',
-              desc: 'Dynamically upgrades the employee score (42% → 85%) and mints a verified GoI Certificate.',
+              desc: 'Dynamically upgrades verified employee capability and mints a verified GoI Certificate.',
               badge: 'Accreditation',
               color: 'border-emerald-300 bg-emerald-50/50',
             },

@@ -100,7 +100,7 @@ export default function LoginPage() {
     setLoading(true);
     void demoLogin(em).then(success => {
       if (success) {
-        const destination = em === 'admin@capacityconnect.in' ? '/admin' : em === 'meera@capacityconnect.in' ? '/team' : '/dashboard';
+        const destination = em === 'admin@capacityconnect.in' ? '/admin' : em === 'meera@capacityconnect.in' ? '/manager' : '/dashboard';
         navigate(destination);
       } else setError('Demo persona is unavailable.');
       setLoading(false);

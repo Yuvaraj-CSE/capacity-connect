@@ -9,14 +9,15 @@ import {
 } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { isSupabaseConfigured, supabase } from '../lib/supabase';
-import { users as initialUsers } from '../data/mockData';
+import { users as initialUsers, courses as demoCourses, enrollments as demoEnrollments, certificates as demoCertificates, competenciesByUser as demoCompetencies, departments as demoDepartments } from '../data/mockData';
+import { getPlatformStats, type PlatformStats } from '../lib/metrics';
 
 export default function AdminPage() {
   const { user } = useAuth();
   const { departments, resetSimulation, isLoopCompleted } = useCapacity();
   const [activeTab, setActiveTab] = useState<'competencies' | 'users' | 'thresholds'>('competencies');
   const [userList, setUserList] = useState<User[]>(() => localStorage.getItem('capacity_connect_demo_user') ? initialUsers : []);
-  const [metrics, setMetrics] = useState({ learners: 0, managers: 0, courses: 0, published: 0, enrollments: 0, averageQuiz: 0, activeLearners: 0 });
+  const [metrics, setMetrics] = useState<PlatformStats | null>(null);
   const [managerAccounts, setManagerAccounts] = useState<Array<{ id: string; full_name: string; email: string | null; manager_approved: boolean; is_active: boolean }>>([]);
   const [approvalCourses, setApprovalCourses] = useState<Array<{ id: string; title: string; content_status: string; created_by: string | null }>>([]);
 
@@ -27,30 +28,56 @@ export default function AdminPage() {
   const [compDesc, setCompDesc] = useState('');
   const [compRequired, setCompRequired] = useState(80);
 
-  const [allComps, setAllComps] = useState<Competency[]>(isSupabaseConfigured && !localStorage.getItem('capacity_connect_demo_user') ? [] : [
-    { id: 'c1', name: 'Digital Readiness', category: 'Domain / Technology', description: 'Ability to adapt and leverage national digital platforms', current: 78, required: 85 },
-    { id: 'c2', name: 'Data Analytics', category: 'Functional', description: 'Interpreting evidence and public datasets for policy decisions', current: 42, required: 75 },
-    { id: 'c3', name: 'Leadership & Ethics', category: 'Behavioral', description: 'Ethical public leadership, delegation, and inspiring teams', current: 65, required: 70 },
-    { id: 'c4', name: 'Citizen Communication', category: 'Behavioral', description: 'Clear and empathetic citizen and stakeholder communication', current: 81, required: 80 },
-    { id: 'c5', name: 'Project & Mission Governance', category: 'Functional', description: 'End-to-end execution of public projects and PM Gati Shakti workflows', current: 72, required: 80 },
-    { id: 'c6', name: 'Cyber Security & Privacy', category: 'Domain / Technology', description: 'Understanding CERT-In protocols and data privacy compliance', current: 55, required: 75 },
-  ]);
+  const [allComps, setAllComps] = useState<Competency[]>([]);
+
+  function demoCompetencyDefinitions() {
+    const definitions = new Map<string, Competency>();
+    Object.values(demoCompetencies).flat().forEach(competency => {
+      if (!definitions.has(competency.id)) definitions.set(competency.id, competency);
+    });
+    return Array.from(definitions.values());
+  }
 
   useEffect(() => {
     async function loadMetrics() {
+      const demoMode = Boolean(localStorage.getItem('capacity_connect_demo_user'));
+      if (demoMode) {
+        setMetrics(getPlatformStats({
+          users: initialUsers,
+          courses: demoCourses,
+          enrollments: demoEnrollments,
+          certificates: demoCertificates,
+          competencies: Object.entries(demoCompetencies).flatMap(([userId, competencies]) => competencies.map(competency => ({ ...competency, userId }))),
+          departments: demoDepartments,
+        }));
+        setUserList(initialUsers);
+        setAllComps(demoCompetencyDefinitions());
+        setManagerAccounts(initialUsers.filter(item => item.role === 'manager').map(manager => ({ id: manager.id, full_name: manager.name, email: manager.email, manager_approved: true, is_active: true })));
+        setApprovalCourses([]);
+        return;
+      }
       if (!supabase || !isSupabaseConfigured) return;
-      const [learners, managerCount, courses, published, enrollments, attempts, active] = await Promise.all([
-        supabase.from('profiles').select('id', { count: 'exact', head: true }).eq('role', 'learner'),
-        supabase.from('profiles').select('id', { count: 'exact', head: true }).eq('role', 'manager'),
-        supabase.from('courses').select('id', { count: 'exact', head: true }),
-        supabase.from('courses').select('id', { count: 'exact', head: true }).eq('is_published', true),
-        supabase.from('enrollments').select('id', { count: 'exact', head: true }),
-        supabase.from('quiz_attempts').select('score'),
-        supabase.from('enrollments').select('user_id').is('completed_at', null),
+      const [{ data: profileRows }, { data: courseRows }, { data: enrollments }, { data: attempts }, { data: certificates }, { data: userCompetencies }, { data: competencyDefinitionRows }] = await Promise.all([
+        supabase.from('profiles').select('id, role, department, full_name, email, position, avatar, created_at'),
+        supabase.from('courses').select('id'),
+        supabase.from('enrollments').select('user_id, course_id, enrolled_at, completed_at'),
+        supabase.from('quiz_attempts').select('user_id, score'),
+        supabase.from('certificates').select('user_id, verification_status'),
+        supabase.from('user_competencies').select('user_id, competency_id, current_score, required_score'),
+        supabase.from('competencies').select('id, name, category, description, default_required').order('name'),
       ]);
-      const scores = attempts.data || [];
-      const uniqueActive = new Set((active.data || []).map(item => item.user_id)).size;
-      setMetrics({ learners: learners.count || 0, managers: managerCount.count || 0, courses: courses.count || 0, published: published.count || 0, enrollments: enrollments.count || 0, averageQuiz: scores.length ? Math.round(scores.reduce((sum, item) => sum + item.score, 0) / scores.length) : 0, activeLearners: uniqueActive });
+      const profileUsers = (profileRows || []).map(profile => ({ id: profile.id, role: profile.role as 'learner' | 'manager' | 'admin', department: profile.department }));
+      const competencyRows = (userCompetencies || []).map(item => ({ id: item.competency_id, userId: item.user_id, current: item.current_score, required: item.required_score }));
+      const definitionRows = (competencyDefinitionRows || []).map(item => ({ id: item.id, userId: '', current: 0, required: item.default_required }));
+      setMetrics(getPlatformStats({
+        users: profileUsers,
+        courses: (courseRows || []).map(course => ({ id: String(course.id) })),
+        enrollments: (enrollments || []).map(item => ({ userId: item.user_id, courseId: String(item.course_id), progress: item.completed_at ? 100 : 0, completedAt: item.completed_at || undefined })),
+        certificates: (certificates || []).map(item => ({ userId: item.user_id, verificationStatus: item.verification_status })),
+        competencies: [...competencyRows, ...definitionRows],
+        departments: Array.from(new Set(profileUsers.map(profile => profile.department).filter(Boolean))).map(name => ({ id: name, name })),
+        attempts: (attempts || []).map(attempt => ({ userId: attempt.user_id, score: attempt.score })),
+      }));
       const { data: managerProfiles } = await supabase.from('profiles').select('id, full_name, email, manager_approved, is_active').eq('role', 'manager').order('created_at', { ascending: false });
       setManagerAccounts(managerProfiles || []);
       const { data: profiles } = await supabase.from('profiles').select('*').order('created_at', { ascending: false });
@@ -60,9 +87,8 @@ export default function AdminPage() {
       })));
       const { data: pendingCourses } = await supabase.from('courses').select('id, title, content_status, created_by').in('content_status', ['Submitted', 'Under Review']).order('created_at', { ascending: false });
       setApprovalCourses((pendingCourses || []).map(course => ({ id: String(course.id), title: course.title || 'Untitled course', content_status: course.content_status, created_by: course.created_by })));
-      const { data: competencyDefinitions } = await supabase.from('competencies').select('*').order('name');
-      if (competencyDefinitions && competencyDefinitions.length > 0) {
-        setAllComps(competencyDefinitions.map(comp => ({ id: comp.id, name: comp.name, category: comp.category, description: comp.description, current: 0, required: comp.default_required })));
+      if (competencyDefinitionRows && competencyDefinitionRows.length > 0) {
+        setAllComps(competencyDefinitionRows.map(comp => ({ id: comp.id, name: comp.name, category: comp.category, description: comp.description, current: 0, required: comp.default_required })));
       }
     }
     void loadMetrics();
@@ -99,6 +125,9 @@ export default function AdminPage() {
 
   if (!user) return null;
 
+  const hasPlatformData = Boolean(metrics && (metrics.totalUsers || metrics.totalCourses || metrics.courseEnrollments || metrics.certificates || metrics.skills));
+  const displayMetric = (value: number | null, suffix = '') => hasPlatformData && value !== null && value > 0 ? `${value}${suffix}` : 'No data available yet';
+
   function handleAddCompetency(e: React.FormEvent) {
     e.preventDefault();
     if (!compName.trim()) return;
@@ -128,9 +157,19 @@ export default function AdminPage() {
 
   return (
     <div className="p-6 md:p-8 max-w-7xl mx-auto animate-fade-in space-y-8">
-      <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3">
-        {[['Learners', metrics.learners], ['Managers', metrics.managers], ['Courses', metrics.courses], ['Published', metrics.published], ['Enrollments', metrics.enrollments], ['Avg quiz', `${metrics.averageQuiz}%`], ['Active learners', metrics.activeLearners]].map(([label, value]) => <div key={String(label)} className="gov-card p-4"><p className="text-[10px] uppercase font-bold text-slate-400">{label}</p><p className="text-xl font-black text-[#0b2545] mt-1">{value}</p></div>)}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        {[
+          ['Total Users', metrics ? displayMetric(metrics.totalUsers) : 'No data available yet'],
+          ['Total Courses', metrics ? displayMetric(metrics.totalCourses) : 'No data available yet'],
+          ['Active Learners', metrics ? displayMetric(metrics.activeLearners) : 'No data available yet'],
+          ['Course Enrollments', metrics ? displayMetric(metrics.courseEnrollments) : 'No data available yet'],
+          ['Course Completions', metrics ? displayMetric(metrics.courseCompletions) : 'No data available yet'],
+          ['Certificates', metrics ? displayMetric(metrics.certificates) : 'No data available yet'],
+          ['Skills', metrics ? displayMetric(metrics.skills) : 'No data available yet'],
+          ['Teams', metrics ? displayMetric(metrics.teams) : 'No data available yet'],
+        ].map(([label, value]) => <div key={String(label)} className="gov-card p-4"><p className="text-[10px] uppercase font-bold text-slate-400">{label}</p><p className="text-xl font-black text-[#0b2545] mt-1">{value}</p></div>)}
       </div>
+      {localStorage.getItem('capacity_connect_demo_user') && <div className="bg-amber-50 border border-amber-200 rounded-2xl px-4 py-3 text-xs font-semibold text-amber-900">DEMO / SAMPLE DATA: Admin metrics are calculated from the shared Capacity Connect demo records.</div>}
       {managerAccounts.length > 0 && <div className="gov-card p-5"><div className="flex items-center justify-between mb-3"><div><h2 className="font-bold text-slate-900">Manager access review</h2><p className="text-xs text-slate-500 mt-1">Approval and active status are enforced by Supabase RLS.</p></div></div><div className="space-y-2">{managerAccounts.map(manager => <div key={manager.id} className="flex flex-wrap items-center justify-between gap-3 border border-slate-200 rounded-xl p-3"><div><p className="text-xs font-bold text-slate-900">{manager.full_name}</p><p className="text-[11px] text-slate-500">{manager.email || 'No email'}</p></div><div className="flex items-center gap-2"><span className={`text-[10px] font-bold px-2 py-1 rounded-full ${manager.manager_approved ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'}`}>{manager.manager_approved ? 'Approved' : 'Pending'}</span><button onClick={() => void updateManager(manager.id, { manager_approved: !manager.manager_approved })} className="text-xs font-bold text-[#0b2545] hover:underline">{manager.manager_approved ? 'Revoke' : 'Approve'}</button><button onClick={() => void updateManager(manager.id, { is_active: !manager.is_active })} className="text-xs font-bold text-red-700 hover:underline">{manager.is_active ? 'Disable' : 'Enable'}</button></div></div>)}</div></div>}
       {approvalCourses.length > 0 && <div className="gov-card p-5"><div className="mb-3"><h2 className="font-bold text-slate-900">Content approval queue</h2><p className="text-xs text-slate-500 mt-1">Only approved content is visible to normal learners.</p></div><div className="space-y-2">{approvalCourses.map(course => <div key={course.id} className="flex flex-wrap items-center justify-between gap-3 border border-slate-200 rounded-xl p-3"><div><p className="text-xs font-bold text-slate-900">{course.title}</p><p className="text-[11px] text-amber-700">{course.content_status}</p></div><div className="flex items-center gap-3"><button onClick={() => void updateCourseApproval(course.id, 'Approved')} className="text-xs font-bold text-emerald-700 hover:underline">Approve</button><button onClick={() => void updateCourseApproval(course.id, 'Rejected')} className="text-xs font-bold text-red-700 hover:underline">Reject</button></div></div>)}</div></div>}
       {/* Header */}

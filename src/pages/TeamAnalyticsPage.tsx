@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useCapacity } from '../context/CapacityContext';
 import { isSupabaseConfigured, supabase } from '../lib/supabase';
-import { users as demoUsers, enrollments as demoEnrollments, courses as demoCourses, competenciesByUser as demoCompetencies } from '../data/mockData';
+import { users as demoUsers, enrollments as demoEnrollments, courses as demoCourses, competenciesByUser as demoCompetencies, certificates as demoCertificates } from '../data/mockData';
+import { getManagerTeamStats } from '../lib/metrics';
 import { StatCard, ProgressBar, Avatar, ScorePill, StateEmblem } from '../components/ui/SharedComponents';
 import {
   Users, Brain, AlertTriangle, BookOpen, Send,
@@ -11,19 +13,22 @@ import {
 import toast from 'react-hot-toast';
 
 type TeamMember = { id: string; name: string; email: string; role: 'learner'; department: string; position: string; avatar: string };
-type TeamEnrollment = { user_id: string; course_id: string; enrolled_at: string; completed_at: string | null };
+type TeamEnrollment = { user_id: string; course_id: string; enrolled_at: string; completed_at: string | null; progress: number };
 type TeamAttempt = { user_id: string; score: number; passed: boolean };
 type TeamCompetency = { user_id: string; competency_id: string; current_score: number; required_score: number };
+type TeamCertificate = { user_id: string; verification_status?: string };
 
 export default function TeamAnalyticsPage() {
   const { user } = useAuth();
   const { departments, isLoopCompleted } = useCapacity();
+  const navigate = useNavigate();
   const [selectedMemberId, setSelectedMemberId] = useState<string>('');
   const [searchMember, setSearchMember] = useState('');
   const [teamMembers, setTeamMembers] = useState<TeamMember[]>([]);
   const [teamEnrollments, setTeamEnrollments] = useState<TeamEnrollment[]>([]);
   const [teamAttempts, setTeamAttempts] = useState<TeamAttempt[]>([]);
   const [teamCompetencies, setTeamCompetencies] = useState<TeamCompetency[]>([]);
+  const [teamCertificates, setTeamCertificates] = useState<TeamCertificate[]>([]);
   const [courseNames, setCourseNames] = useState<Record<string, string>>({});
   const [competencyNames, setCompetencyNames] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
@@ -32,13 +37,14 @@ export default function TeamAnalyticsPage() {
 
   useEffect(() => {
     async function loadTeamData() {
-      if (localStorage.getItem('capacity_connect_demo_user') === 'meera@capacityconnect.in') {
-        const demoDepartment = demoUsers.find(candidate => candidate.id === 'u6')?.department || 'Engineering';
+      if (localStorage.getItem('capacity_connect_demo_user')) {
+        const demoDepartment = user?.department || 'Engineering';
         const members = demoUsers.filter(candidate => candidate.department === demoDepartment && candidate.role === 'learner').map(member => ({ id: member.id, name: member.name, email: member.email, role: 'learner' as const, department: member.department, position: member.position, avatar: member.avatar }));
         setTeamMembers(members);
         setSelectedMemberId(previous => previous || members[0]?.id || '');
-        setTeamEnrollments(demoEnrollments.filter(enrollment => members.some(member => member.id === enrollment.userId)).map(enrollment => ({ user_id: enrollment.userId, course_id: enrollment.courseId, enrolled_at: enrollment.startedAt, completed_at: enrollment.completedAt || null })));
+        setTeamEnrollments(demoEnrollments.filter(enrollment => members.some(member => member.id === enrollment.userId)).map(enrollment => ({ user_id: enrollment.userId, course_id: enrollment.courseId, enrolled_at: enrollment.startedAt, completed_at: enrollment.completedAt || null, progress: enrollment.progress })));
         setTeamCompetencies(members.flatMap(member => (demoCompetencies[member.id] || []).map(competency => ({ user_id: member.id, competency_id: competency.id, current_score: competency.current, required_score: competency.required }))));
+        setTeamCertificates(demoCertificates.filter(certificate => members.some(member => member.id === certificate.userId)).map(certificate => ({ user_id: certificate.userId, verification_status: 'valid' })));
         setCourseNames(Object.fromEntries(demoCourses.map(course => [course.id, course.title])));
         setCompetencyNames(Object.fromEntries(Object.values(demoCompetencies).flat().map(competency => [competency.id, competency.name])));
         setLoading(false);
@@ -57,16 +63,18 @@ export default function TeamAnalyticsPage() {
       if (memberIds.length === 0) {
         setTeamEnrollments([]); setTeamAttempts([]); setTeamCompetencies([]); setLoading(false); return;
       }
-      const [{ data: enrollments }, { data: attempts }, { data: competencies }, { data: courses }, { data: competencyDefinitions }] = await Promise.all([
+      const [{ data: enrollments }, { data: attempts }, { data: competencies }, { data: courses }, { data: competencyDefinitions }, { data: certificates }] = await Promise.all([
         supabase.from('enrollments').select('user_id, course_id, enrolled_at, completed_at').in('user_id', memberIds),
         supabase.from('quiz_attempts').select('user_id, score, passed').in('user_id', memberIds),
         supabase.from('user_competencies').select('user_id, competency_id, current_score, required_score').in('user_id', memberIds),
         supabase.from('courses').select('id, title'),
         supabase.from('competencies').select('id, name'),
+        supabase.from('certificates').select('user_id, verification_status').in('user_id', memberIds),
       ]);
-      setTeamEnrollments(enrollments || []);
+      setTeamEnrollments((enrollments || []).map(enrollment => ({ ...enrollment, progress: enrollment.completed_at ? 100 : 0 })));
       setTeamAttempts(attempts || []);
       setTeamCompetencies(competencies || []);
+      setTeamCertificates(certificates || []);
       setCourseNames(Object.fromEntries((courses || []).map(course => [String(course.id), course.title || 'Untitled course'])));
       setCompetencyNames(Object.fromEntries((competencyDefinitions || []).map(competency => [competency.id, competency.name])));
       setLoading(false);
@@ -85,13 +93,13 @@ export default function TeamAnalyticsPage() {
   const selectedCompetencies = selectedMember ? teamCompetencies.filter(item => item.user_id === selectedMember.id) : [];
   const memberEnrollments = selectedMember ? teamEnrollments.filter(item => item.user_id === selectedMember.id) : [];
 
-  // Compute live team capability average
-  const teamCapabilityScores = teamMembers.map(member => {
-    const comps = teamCompetencies.filter(item => item.user_id === member.id);
-    return comps.length ? comps.reduce((sum, item) => sum + Math.min(item.current_score / Math.max(item.required_score, 1), 1) * 100, 0) / comps.length : null;
-  }).filter((score): score is number => score !== null);
-  const teamCapabilityAvg = teamCapabilityScores.length ? Math.round(teamCapabilityScores.reduce((sum, score) => sum + score, 0) / teamCapabilityScores.length) : null;
-  const averageAssessment = teamAttempts.length ? Math.round(teamAttempts.reduce((sum, attempt) => sum + attempt.score, 0) / teamAttempts.length) : null;
+  const managerStats = getManagerTeamStats({
+    memberIds: teamMembers.map(member => member.id),
+    enrollments: teamEnrollments.map(enrollment => ({ userId: enrollment.user_id, courseId: enrollment.course_id, progress: enrollment.progress, completedAt: enrollment.completed_at || undefined })),
+    competencies: teamCompetencies.map(competency => ({ id: competency.competency_id, userId: competency.user_id, current: competency.current_score, required: competency.required_score })),
+    certificates: teamCertificates.map(certificate => ({ userId: certificate.user_id, verificationStatus: certificate.verification_status as 'valid' | 'revoked' | undefined })),
+    attempts: teamAttempts.map(attempt => ({ userId: attempt.user_id, score: attempt.score })),
+  });
 
   const matrixCompetencies = [
     'Digital Readiness',
@@ -101,10 +109,6 @@ export default function TeamAnalyticsPage() {
     'Cyber Security',
     'Project Management',
   ];
-
-  function handleRecommendCourse(memberName: string, courseTitle: string) {
-    toast.success(`Recommendation recorded for ${memberName}: ${courseTitle}.`);
-  }
 
   function handleScheduleReview(memberName: string) {
     toast.success(`1-on-1 Capability Audit scheduled with ${memberName}!`);
@@ -137,6 +141,31 @@ export default function TeamAnalyticsPage() {
         </div>
       </div>
 
+      {localStorage.getItem('capacity_connect_demo_user') && (
+        <div className="bg-amber-50 border border-amber-200 rounded-2xl px-4 py-3 text-xs font-semibold text-amber-900">
+          DEMO / SAMPLE DATA: Team metrics below use the current Capacity Connect demo manager dataset.
+        </div>
+      )}
+
+      {teamMembers.length > 0 && teamCompetencies.length > 0 ? (
+        <section className="bg-[#0b2545] rounded-3xl p-6 text-white border-2 border-[#ff9933]/60 shadow-lg flex flex-col lg:flex-row items-start lg:items-center justify-between gap-6">
+          <div>
+            <span className="text-[10px] font-black uppercase tracking-wider px-2.5 py-0.5 rounded-full bg-red-500/20 text-red-300 border border-red-500/40">Priority team action</span>
+            <h2 className="text-xl font-bold mt-2">Data Analytics Skill Gap Detected</h2>
+            <p className="text-xs text-slate-300 mt-1 leading-relaxed max-w-2xl">Team members are below the required competency benchmark. Review the skill gap and assign the recommended learning path.</p>
+          </div>
+          <div className="flex flex-wrap items-center gap-3 flex-shrink-0">
+            <button onClick={() => document.getElementById('skill-gaps')?.scrollIntoView({ behavior: 'smooth' })} className="px-5 py-3 bg-white/10 hover:bg-white/20 text-white text-xs font-bold rounded-xl border border-white/20 transition-all">Review Skill Gap</button>
+            <button onClick={() => navigate('/courses')} className="px-5 py-3 bg-[#ff9933] hover:bg-[#e06d00] text-slate-950 text-xs font-black rounded-xl transition-all">Assign Learning</button>
+          </div>
+        </section>
+      ) : (
+        <div className="bg-slate-100 rounded-3xl p-6 text-slate-700 border border-slate-200">
+          <h2 className="text-lg font-bold text-slate-900">No team learning data yet</h2>
+          <p className="text-xs mt-1">Team skill-gap actions will appear when learner records and competency data are available.</p>
+        </div>
+      )}
+
       {/* Closed-Loop Verification Note for Manager */}
     {isLoopCompleted && teamMembers.length > 0 && (
         <div className="bg-emerald-50 border border-emerald-300 rounded-2xl p-4 flex items-start gap-3">
@@ -153,49 +182,59 @@ export default function TeamAnalyticsPage() {
       )}
 
       {/* KPI Cards */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-5">
+      <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-5">
         <StatCard
-          label="Division Capability Score"
-          value={teamCapabilityAvg === null ? 'No data yet' : `${teamCapabilityAvg}%`}
+          label="Team Capability Index"
+          value={managerStats.teamCapability === null ? 'No data yet' : `${managerStats.teamCapability}%`}
           sub="Calculated from persisted competencies"
           icon={<Brain size={20} />}
           color="blue"
           badge="Live Index"
         />
         <StatCard
-          label="Managed Staff"
-          value={teamMembers.length || 'No team data available yet'}
+          label="Team Members"
+          value={managerStats.teamMembers || 'No team data available yet'}
           sub="Persisted learner profiles"
           icon={<Users size={20} />}
           color="teal"
         />
         <StatCard
-          label="Critical Deficits"
-          value={teamCompetencies.length === 0 ? 'No data yet' :
-            teamMembers.reduce((count, m) => {
-              const comps = teamCompetencies.filter(item => item.user_id === m.id);
-              return count + comps.filter(item => item.required_score - item.current_score > 20).length;
-            }, 0)}
-          sub="Deficits > 20 points"
-          icon={<AlertTriangle size={20} />}
-          color={isLoopCompleted ? 'green' : 'red'}
-          badge={isLoopCompleted ? 'Zero Critical' : 'Deficits Present'}
-        />
-        <StatCard
-          label="Active Training Programs"
-          value={teamEnrollments.length || 'No data yet'}
-          sub="Persisted course enrollments"
+          label="Active Learners"
+          value={managerStats.activeLearners || 'No team learning data yet'}
+          sub="Learners with course activity"
           icon={<BookOpen size={20} />}
           color="gold"
         />
+        <StatCard
+          label="Team Learning Completion"
+          value={managerStats.teamLearningCompletion === null ? 'No data yet' : `${managerStats.teamLearningCompletion}%`}
+          sub="Completed team enrollments"
+          icon={<BookOpen size={20} />}
+          color="gold"
+        />
+        <StatCard
+          label="Remaining Skill Gaps"
+          value={teamCompetencies.length === 0 ? 'No data yet' : managerStats.skillGaps}
+          sub="Below required benchmark"
+          icon={<AlertTriangle size={20} />}
+          color={isLoopCompleted ? 'green' : 'red'}
+          badge={isLoopCompleted ? 'Improving' : 'Needs action'}
+        />
+        <StatCard
+          label="Verified Team Credentials"
+          value={managerStats.teamCertificates || 'No team certificates yet'}
+          sub="Valid team certificates"
+          icon={<Award size={20} />}
+          color="teal"
+        />
       </div>
       <div className="gov-card p-5 flex items-center justify-between gap-4">
-        <div><p className="text-[10px] uppercase font-bold text-slate-400">Average assessment score</p><p className="text-2xl font-black text-[#0b2545] mt-1">{averageAssessment === null ? 'No data yet' : `${averageAssessment}%`}</p></div>
-        <p className="text-xs text-slate-500">Calculated from persisted team quiz attempts</p>
+        <div><p className="text-[10px] uppercase font-bold text-slate-400">Course assignments</p><p className="text-2xl font-black text-[#0b2545] mt-1">{managerStats.courseAssignments || 'No data yet'}</p></div>
+        <div className="text-right"><p className="text-[10px] uppercase font-bold text-slate-400">Assessment performance</p><p className="text-2xl font-black text-[#0b2545] mt-1">{managerStats.assessmentPerformance === null ? 'No data yet' : `${managerStats.assessmentPerformance}%`}</p><p className="text-xs text-slate-500">Calculated from persisted team attempts</p></div>
       </div>
 
       {/* Team Competency Heatmap / Matrix */}
-      <div className="gov-card p-6">
+      <div id="skill-gaps" className="gov-card p-6">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-6">
           <div>
             <h3 className="text-lg font-bold text-slate-900">National Competency Matrix (FRAC)</h3>
@@ -293,8 +332,8 @@ export default function TeamAnalyticsPage() {
       </div>
 
       {/* Selected Member Detail View */}
-      <div className="grid lg:grid-cols-3 gap-6">
-        <div className="lg:col-span-2 gov-card p-6">
+      <div id="competency" className="grid lg:grid-cols-3 gap-6">
+        <div id="progress" className="lg:col-span-2 gov-card p-6">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-6 border-b border-slate-100 mb-6">
             <div className="flex items-center gap-4">
               <Avatar initials={selectedMember?.avatar || 'NA'} size="lg" />
@@ -344,11 +383,8 @@ export default function TeamAnalyticsPage() {
                       <span className="text-[11px] text-slate-600 font-semibold">
                         Critical deficit requires immediate learning prescription
                       </span>
-                      <button
-                        onClick={() => selectedMember && handleRecommendCourse(selectedMember.name, `${competencyNames[c.competency_id] || c.competency_id} Acceleration`)}
-                        className="text-xs font-bold text-[#0b2545] hover:underline flex items-center gap-1"
-                      >
-                        <Send size={12} /> Prescribe Pathway
+                      <button onClick={() => navigate('/courses')} className="text-xs font-bold text-[#0b2545] hover:underline flex items-center gap-1">
+                        <Send size={12} /> Assign Learning
                       </button>
                     </div>
                   )}
@@ -385,9 +421,9 @@ export default function TeamAnalyticsPage() {
             </div>
             <h4 className="text-base font-bold">Executive Recommendation</h4>
             <p className="text-xs text-slate-300 mt-1 leading-relaxed">
-              {averageAssessment === null
+              {managerStats.assessmentPerformance === null
                 ? 'No assessment data available yet.'
-                : `Team average assessment score: ${averageAssessment}%. Review members with persistent competency gaps and recommend targeted learning.`}
+                : `Team average assessment score: ${managerStats.assessmentPerformance}%. Review members with persistent competency gaps and recommend targeted learning.`}
             </p>
           </div>
         </div>
