@@ -1,7 +1,6 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { useCapacity } from '../context/CapacityContext';
-import { users as initialUsers } from '../data/mockData';
 import type { User, Competency } from '../types';
 import { Badge, Avatar } from '../components/ui/SharedComponents';
 import {
@@ -9,12 +8,17 @@ import {
   RotateCcw, Sparkles
 } from 'lucide-react';
 import toast from 'react-hot-toast';
+import { isSupabaseConfigured, supabase } from '../lib/supabase';
+import { users as initialUsers } from '../data/mockData';
 
 export default function AdminPage() {
   const { user } = useAuth();
   const { departments, resetSimulation, isLoopCompleted } = useCapacity();
   const [activeTab, setActiveTab] = useState<'competencies' | 'users' | 'thresholds'>('competencies');
-  const [userList] = useState<User[]>(initialUsers);
+  const [userList, setUserList] = useState<User[]>(() => localStorage.getItem('capacity_connect_demo_user') ? initialUsers : []);
+  const [metrics, setMetrics] = useState({ learners: 0, managers: 0, courses: 0, published: 0, enrollments: 0, averageQuiz: 0, activeLearners: 0 });
+  const [managerAccounts, setManagerAccounts] = useState<Array<{ id: string; full_name: string; email: string | null; manager_approved: boolean; is_active: boolean }>>([]);
+  const [approvalCourses, setApprovalCourses] = useState<Array<{ id: string; title: string; content_status: string; created_by: string | null }>>([]);
 
   // New Competency Form State
   const [showAddCompModal, setShowAddCompModal] = useState(false);
@@ -23,7 +27,7 @@ export default function AdminPage() {
   const [compDesc, setCompDesc] = useState('');
   const [compRequired, setCompRequired] = useState(80);
 
-  const [allComps, setAllComps] = useState<Competency[]>([
+  const [allComps, setAllComps] = useState<Competency[]>(isSupabaseConfigured && !localStorage.getItem('capacity_connect_demo_user') ? [] : [
     { id: 'c1', name: 'Digital Readiness', category: 'Domain / Technology', description: 'Ability to adapt and leverage national digital platforms', current: 78, required: 85 },
     { id: 'c2', name: 'Data Analytics', category: 'Functional', description: 'Interpreting evidence and public datasets for policy decisions', current: 42, required: 75 },
     { id: 'c3', name: 'Leadership & Ethics', category: 'Behavioral', description: 'Ethical public leadership, delegation, and inspiring teams', current: 65, required: 70 },
@@ -31,6 +35,67 @@ export default function AdminPage() {
     { id: 'c5', name: 'Project & Mission Governance', category: 'Functional', description: 'End-to-end execution of public projects and PM Gati Shakti workflows', current: 72, required: 80 },
     { id: 'c6', name: 'Cyber Security & Privacy', category: 'Domain / Technology', description: 'Understanding CERT-In protocols and data privacy compliance', current: 55, required: 75 },
   ]);
+
+  useEffect(() => {
+    async function loadMetrics() {
+      if (!supabase || !isSupabaseConfigured) return;
+      const [learners, managerCount, courses, published, enrollments, attempts, active] = await Promise.all([
+        supabase.from('profiles').select('id', { count: 'exact', head: true }).eq('role', 'learner'),
+        supabase.from('profiles').select('id', { count: 'exact', head: true }).eq('role', 'manager'),
+        supabase.from('courses').select('id', { count: 'exact', head: true }),
+        supabase.from('courses').select('id', { count: 'exact', head: true }).eq('is_published', true),
+        supabase.from('enrollments').select('id', { count: 'exact', head: true }),
+        supabase.from('quiz_attempts').select('score'),
+        supabase.from('enrollments').select('user_id').is('completed_at', null),
+      ]);
+      const scores = attempts.data || [];
+      const uniqueActive = new Set((active.data || []).map(item => item.user_id)).size;
+      setMetrics({ learners: learners.count || 0, managers: managerCount.count || 0, courses: courses.count || 0, published: published.count || 0, enrollments: enrollments.count || 0, averageQuiz: scores.length ? Math.round(scores.reduce((sum, item) => sum + item.score, 0) / scores.length) : 0, activeLearners: uniqueActive });
+      const { data: managerProfiles } = await supabase.from('profiles').select('id, full_name, email, manager_approved, is_active').eq('role', 'manager').order('created_at', { ascending: false });
+      setManagerAccounts(managerProfiles || []);
+      const { data: profiles } = await supabase.from('profiles').select('*').order('created_at', { ascending: false });
+      setUserList((profiles || []).map(profile => ({
+        id: profile.id, name: profile.full_name, email: profile.email || '', role: profile.role as User['role'], department: profile.department,
+        position: profile.position, avatar: profile.avatar, joinedDate: profile.created_at.slice(0, 10),
+      })));
+      const { data: pendingCourses } = await supabase.from('courses').select('id, title, content_status, created_by').in('content_status', ['Submitted', 'Under Review']).order('created_at', { ascending: false });
+      setApprovalCourses((pendingCourses || []).map(course => ({ id: String(course.id), title: course.title || 'Untitled course', content_status: course.content_status, created_by: course.created_by })));
+      const { data: competencyDefinitions } = await supabase.from('competencies').select('*').order('name');
+      if (competencyDefinitions && competencyDefinitions.length > 0) {
+        setAllComps(competencyDefinitions.map(comp => ({ id: comp.id, name: comp.name, category: comp.category, description: comp.description, current: 0, required: comp.default_required })));
+      }
+    }
+    void loadMetrics();
+  }, []);
+
+  async function updateManager(id: string, changes: { manager_approved?: boolean; is_active?: boolean }) {
+    if (!supabase) return;
+    const { error } = await supabase.from('profiles').update(changes).eq('id', id);
+    if (error) toast.error(error.message);
+    else { setManagerAccounts(previous => previous.map(manager => manager.id === id ? { ...manager, ...changes } : manager)); toast.success('Manager access updated.'); }
+  }
+
+  async function updateCourseApproval(id: string, status: 'Approved' | 'Rejected') {
+    if (!supabase) return;
+    const { error } = await supabase.from('courses').update({ content_status: status, is_published: status === 'Approved' }).eq('id', id);
+    if (error) toast.error(error.message);
+    else {
+      setApprovalCourses(previous => previous.filter(course => course.id !== id));
+      toast.success(`Course ${status.toLowerCase()}.`);
+    }
+  }
+
+  async function updateManagerRole(target: User) {
+    if (!supabase || target.role === 'admin') return;
+    const nextRole = target.role === 'manager' ? 'learner' : 'manager';
+    const { error } = await supabase.from('profiles').update({ role: nextRole, manager_approved: nextRole === 'manager' }).eq('id', target.id);
+    if (error) {
+      toast.error(error.message);
+      return;
+    }
+    setUserList(previous => previous.map(item => item.id === target.id ? { ...item, role: nextRole } : item));
+    toast.success(nextRole === 'manager' ? `${target.name} is now a manager.` : `Manager access revoked for ${target.name}.`);
+  }
 
   if (!user) return null;
 
@@ -47,7 +112,14 @@ export default function AdminPage() {
       required: Number(compRequired) || 80,
     };
 
-    setAllComps(prev => [...prev, newComp]);
+    if (isSupabaseConfigured && supabase) {
+      void supabase.from('competencies').insert({ id: newComp.id, name: newComp.name, category: newComp.category, description: newComp.description, default_required: newComp.required }).then(({ error }) => {
+        if (error) toast.error(error.message);
+        else setAllComps(prev => [...prev, newComp]);
+      });
+    } else {
+      setAllComps(prev => [...prev, newComp]);
+    }
     setShowAddCompModal(false);
     setCompName('');
     setCompDesc('');
@@ -56,6 +128,11 @@ export default function AdminPage() {
 
   return (
     <div className="p-6 md:p-8 max-w-7xl mx-auto animate-fade-in space-y-8">
+      <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3">
+        {[['Learners', metrics.learners], ['Managers', metrics.managers], ['Courses', metrics.courses], ['Published', metrics.published], ['Enrollments', metrics.enrollments], ['Avg quiz', `${metrics.averageQuiz}%`], ['Active learners', metrics.activeLearners]].map(([label, value]) => <div key={String(label)} className="gov-card p-4"><p className="text-[10px] uppercase font-bold text-slate-400">{label}</p><p className="text-xl font-black text-[#0b2545] mt-1">{value}</p></div>)}
+      </div>
+      {managerAccounts.length > 0 && <div className="gov-card p-5"><div className="flex items-center justify-between mb-3"><div><h2 className="font-bold text-slate-900">Manager access review</h2><p className="text-xs text-slate-500 mt-1">Approval and active status are enforced by Supabase RLS.</p></div></div><div className="space-y-2">{managerAccounts.map(manager => <div key={manager.id} className="flex flex-wrap items-center justify-between gap-3 border border-slate-200 rounded-xl p-3"><div><p className="text-xs font-bold text-slate-900">{manager.full_name}</p><p className="text-[11px] text-slate-500">{manager.email || 'No email'}</p></div><div className="flex items-center gap-2"><span className={`text-[10px] font-bold px-2 py-1 rounded-full ${manager.manager_approved ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'}`}>{manager.manager_approved ? 'Approved' : 'Pending'}</span><button onClick={() => void updateManager(manager.id, { manager_approved: !manager.manager_approved })} className="text-xs font-bold text-[#0b2545] hover:underline">{manager.manager_approved ? 'Revoke' : 'Approve'}</button><button onClick={() => void updateManager(manager.id, { is_active: !manager.is_active })} className="text-xs font-bold text-red-700 hover:underline">{manager.is_active ? 'Disable' : 'Enable'}</button></div></div>)}</div></div>}
+      {approvalCourses.length > 0 && <div className="gov-card p-5"><div className="mb-3"><h2 className="font-bold text-slate-900">Content approval queue</h2><p className="text-xs text-slate-500 mt-1">Only approved content is visible to normal learners.</p></div><div className="space-y-2">{approvalCourses.map(course => <div key={course.id} className="flex flex-wrap items-center justify-between gap-3 border border-slate-200 rounded-xl p-3"><div><p className="text-xs font-bold text-slate-900">{course.title}</p><p className="text-[11px] text-amber-700">{course.content_status}</p></div><div className="flex items-center gap-3"><button onClick={() => void updateCourseApproval(course.id, 'Approved')} className="text-xs font-bold text-emerald-700 hover:underline">Approve</button><button onClick={() => void updateCourseApproval(course.id, 'Rejected')} className="text-xs font-bold text-red-700 hover:underline">Reject</button></div></div>)}</div></div>}
       {/* Header */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-6 border-b border-slate-200">
         <div>
@@ -202,7 +279,7 @@ export default function AdminPage() {
                   <th className="py-3 px-6">Division</th>
                   <th className="py-3 px-6">Administrative Tier</th>
                   <th className="py-3 px-6">Induction Date</th>
-                  <th className="py-3 px-6 text-right">Audit</th>
+                  <th className="py-3 px-6 text-right">Access</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 text-sm">
@@ -237,12 +314,9 @@ export default function AdminPage() {
                     <td className="py-4 px-6 text-slate-500 text-xs font-mono">{u.joinedDate}</td>
 
                     <td className="py-4 px-6 text-right">
-                      <button
-                        onClick={() => toast.success(`Audit log exported for ${u.name}.`)}
-                        className="text-xs font-bold text-[#0b2545] hover:underline"
-                      >
-                        Service Record
-                      </button>
+                      {u.role !== 'admin' && <button onClick={() => void updateManagerRole(u)} className="text-xs font-bold text-[#0b2545] hover:underline">
+                        {u.role === 'manager' ? 'Revoke manager' : 'Promote to manager'}
+                      </button>}
                     </td>
                   </tr>
                 ))}

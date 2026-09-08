@@ -54,6 +54,7 @@ function week(courseId: string, number: number, title: string, topics: string[])
   const end = new Date(start);
   end.setDate(start.getDate() + 6);
   const iso = (date: Date) => date.toISOString().slice(0, 10);
+  const videoId = `${courseId}-w${number}-video`;
   return {
     id: `${courseId}-w${number}`,
     courseId,
@@ -62,7 +63,16 @@ function week(courseId: string, number: number, title: string, topics: string[])
     startsOn: iso(start),
     endsOn: iso(end),
     resources: [
-      { id: `${courseId}-w${number}-video`, type: 'video', title: `${title}: guided session`, description: 'A short, focused video lesson with practical examples.', durationMinutes: 28 },
+      {
+        id: videoId,
+        type: 'video',
+        title: `${title}: guided session`,
+        description: 'A short, focused video lesson with practical examples and a ready-to-use transcript summary.',
+        durationMinutes: 28,
+        url: 'https://www.youtube.com/watch?v=5qap5aO4i9A',
+        transcript: `This weekly learning module is designed to help learners apply the concept in real public-service work. Review the guided video, reflect on the examples, and complete the check for understanding before moving to the next module.`,
+        transcriptLanguage: 'en',
+      },
       { id: `${courseId}-w${number}-reading`, type: 'reading', title: `${title}: field notes`, description: 'Supporting reading and a workplace reflection prompt.', durationMinutes: 20 },
     ],
     quiz: { id: `${courseId}-w${number}-quiz`, title: `Week ${number} knowledge check`, questions: quizQuestions(`${courseId}-w${number}`, topics), passingScore: 70 },
@@ -84,4 +94,11 @@ export const courseWeeks: CourseWeek[] = [
 
 export function getCourseWeeks(courseId: string) {
   return courseWeeks.filter(courseWeek => courseWeek.courseId === courseId);
+}
+
+export function createFallbackCourseWeeks(courseId: string, courseTitle: string, weekCount: number): CourseWeek[] {
+  return Array.from({ length: weekCount }, (_, index) => {
+    const number = index + 1;
+    return week(courseId, number, `${courseTitle}: module ${number}`, [courseTitle]);
+  });
 }

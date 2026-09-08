@@ -44,6 +44,11 @@ export interface Course {
   outcomes?: string[];
   published?: boolean;
   createdBy?: string;
+  source?: string;
+  sourceUrl?: string;
+  isOfficial?: boolean;
+  isPublished?: boolean;
+  sequentialUnlock?: boolean;
 }
 
 export type LearningResourceType = 'video' | 'reading' | 'resource';
@@ -56,6 +61,8 @@ export interface LearningResource {
   durationMinutes?: number;
   url?: string;
   completed?: boolean;
+  transcript?: string;
+  transcriptLanguage?: string;
 }
 
 export interface WeeklyQuiz {
@@ -163,6 +170,7 @@ export interface Certificate {
   title: string;
   issuedDate: string;
   expiryDate?: string;
+  verificationStatus?: 'valid' | 'revoked';
 }
 
 export interface Department {

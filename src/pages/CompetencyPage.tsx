@@ -15,6 +15,9 @@ export default function CompetencyPage() {
   if (!user) return null;
 
   const comps = competenciesByUser[user.id] || [];
+  if (comps.length === 0) {
+    return <div className="p-6 md:p-8 max-w-7xl mx-auto animate-fade-in"><div className="gov-card p-8 text-center"><Brain size={28} className="mx-auto text-slate-400" /><h1 className="text-xl font-black text-[#0b2545] mt-3">Competency Profile</h1><p className="text-sm text-slate-500 mt-2">No competency data available yet.</p></div></div>;
+  }
   const gaps = comps.map(c => ({ ...c, gap: c.required - c.current }));
   const criticalGaps = gaps.filter(g => g.gap > 15);
   const metTargets = gaps.filter(g => g.gap <= 0);

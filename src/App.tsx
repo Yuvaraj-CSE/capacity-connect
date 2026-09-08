@@ -19,8 +19,10 @@ import TeamAnalyticsPage from './pages/TeamAnalyticsPage';
 import OrgAnalyticsPage from './pages/OrgAnalyticsPage';
 import AlertsPage from './pages/AlertsPage';
 import AdminPage from './pages/AdminPage';
+import ManagerPage from './pages/ManagerPage';
+import CertificateVerificationPage from './pages/CertificateVerificationPage';
 
-function ProtectedLayout({ children }: { children: React.ReactNode }) {
+function ProtectedLayout({ children, roles }: { children: React.ReactNode; roles?: Array<'learner' | 'manager' | 'admin'> }) {
   const { user } = useAuth();
   const { ensureUserProfile } = useCapacity();
 
@@ -30,6 +32,11 @@ function ProtectedLayout({ children }: { children: React.ReactNode }) {
 
   if (!user) {
     return <Navigate to="/login" replace />;
+  }
+  if (roles && !roles.includes(user.role)) {
+    if (user.role === 'manager') return <Navigate to="/manager" replace />;
+    if (user.role === 'admin') return <Navigate to="/admin" replace />;
+    return <Navigate to="/dashboard" replace />;
   }
 
   return (
@@ -63,18 +70,20 @@ export default function App() {
             {/* Public National Portal & Jan Parichay Auth */}
             <Route path="/" element={<LandingPage />} />
             <Route path="/login" element={<LoginPage />} />
+            <Route path="/verify-certificate" element={<CertificateVerificationPage />} />
 
             {/* Authenticated Government Portal Applications */}
-            <Route path="/dashboard" element={<ProtectedLayout><DashboardPage /></ProtectedLayout>} />
+            <Route path="/dashboard" element={<ProtectedLayout roles={['learner']}><DashboardPage /></ProtectedLayout>} />
             <Route path="/competency" element={<ProtectedLayout><CompetencyPage /></ProtectedLayout>} />
-            <Route path="/learning" element={<ProtectedLayout><LearningPathPage /></ProtectedLayout>} />
-            <Route path="/courses" element={<ProtectedLayout><CoursesPage /></ProtectedLayout>} />
-            <Route path="/knowledge" element={<ProtectedLayout><KnowledgeHubPage /></ProtectedLayout>} />
-            <Route path="/assessments" element={<ProtectedLayout><AssessmentsPage /></ProtectedLayout>} />
-            <Route path="/team" element={<ProtectedLayout><TeamAnalyticsPage /></ProtectedLayout>} />
-            <Route path="/analytics" element={<ProtectedLayout><OrgAnalyticsPage /></ProtectedLayout>} />
-            <Route path="/alerts" element={<ProtectedLayout><AlertsPage /></ProtectedLayout>} />
-            <Route path="/admin" element={<ProtectedLayout><AdminPage /></ProtectedLayout>} />
+            <Route path="/learning" element={<ProtectedLayout roles={['learner', 'manager', 'admin']}><LearningPathPage /></ProtectedLayout>} />
+            <Route path="/courses" element={<ProtectedLayout roles={['learner', 'manager', 'admin']}><CoursesPage /></ProtectedLayout>} />
+            <Route path="/knowledge" element={<ProtectedLayout roles={['learner', 'manager', 'admin']}><KnowledgeHubPage /></ProtectedLayout>} />
+            <Route path="/assessments" element={<ProtectedLayout roles={['learner']}><AssessmentsPage /></ProtectedLayout>} />
+            <Route path="/team" element={<ProtectedLayout roles={['manager', 'admin']}><TeamAnalyticsPage /></ProtectedLayout>} />
+            <Route path="/analytics" element={<ProtectedLayout roles={['manager', 'admin']}><OrgAnalyticsPage /></ProtectedLayout>} />
+            <Route path="/alerts" element={<ProtectedLayout roles={['manager', 'admin']}><AlertsPage /></ProtectedLayout>} />
+            <Route path="/manager" element={<ProtectedLayout roles={['manager', 'admin']}><ManagerPage /></ProtectedLayout>} />
+            <Route path="/admin" element={<ProtectedLayout roles={['admin']}><AdminPage /></ProtectedLayout>} />
 
             {/* Fallback */}
             <Route path="*" element={<Navigate to="/" replace />} />

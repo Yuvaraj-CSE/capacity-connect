@@ -19,12 +19,13 @@ interface NavItem {
 }
 
 const navItems: NavItem[] = [
-  { to: '/dashboard',   icon: <LayoutDashboard size={18} />, translationKey: 'navigation.dashboard',          roles: ['learner', 'manager', 'admin'] },
+  { to: '/dashboard',   icon: <LayoutDashboard size={18} />, translationKey: 'navigation.dashboard',          roles: ['learner'] },
   { to: '/competency',  icon: <Brain size={18} />,           translationKey: 'navigation.competencyProfile',   roles: ['learner', 'manager', 'admin'] },
-  { to: '/learning',    icon: <Map size={18} />,             translationKey: 'navigation.capabilityJourney',   roles: ['learner', 'manager'] },
+  { to: '/learning',    icon: <Map size={18} />,             translationKey: 'navigation.capabilityJourney',   roles: ['learner', 'manager', 'admin'] },
+  { to: '/manager',     icon: <Settings size={18} />,        translationKey: 'navigation.courseCatalogue',     roles: ['manager', 'admin'] },
   { to: '/courses',     icon: <BookOpen size={18} />,        translationKey: 'navigation.courseCatalogue',     roles: ['learner', 'manager', 'admin'] },
   { to: '/knowledge',   icon: <Library size={18} />,         translationKey: 'navigation.knowledgeHub',        roles: ['learner', 'manager', 'admin'] },
-  { to: '/assessments', icon: <Target size={18} />,          translationKey: 'navigation.assessments',         roles: ['learner', 'manager', 'admin'] },
+  { to: '/assessments', icon: <Target size={18} />,          translationKey: 'navigation.assessments',         roles: ['learner'] },
   { to: '/team',        icon: <Users size={18} />,           translationKey: 'navigation.teamAnalytics',       roles: ['manager', 'admin'] },
   { to: '/analytics',   icon: <BarChart3 size={18} />,       translationKey: 'navigation.orgAnalytics',        roles: ['admin', 'manager'] },
   { to: '/alerts',      icon: <Shield size={18} />,          translationKey: 'navigation.capabilityAlerts',    roles: ['manager', 'admin'] },
@@ -32,7 +33,7 @@ const navItems: NavItem[] = [
 ];
 
 export default function AppLayout({ children }: { children: React.ReactNode }) {
-  const { user, logout, switchRole } = useAuth();
+  const { user, logout, switchRole, availableRoles } = useAuth();
   const { workflowSteps, resetSimulation, isLoopCompleted, language, t } = useCapacity();
   const navigate = useNavigate();
   const [showRoleSwitcher, setShowRoleSwitcher] = useState(false);
@@ -148,31 +149,24 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
                     <p className="text-[10px] text-slate-400">{t('common.testAccessTiers')}</p>
                   </div>
                   <div className="p-2 space-y-1">
-                    {[
-                      { id: 'u1', label: 'Arjun Sharma', rank: t('roles.learner'), tier: t('roles.gazettedBadge') },
-                      { id: 'u6', label: 'Meera Nair', rank: t('roles.manager'), tier: t('roles.hodBadge') },
-                      { id: 'u9', label: 'Admin User', rank: t('roles.admin'), tier: t('roles.adminBadge') },
-                    ].map(u => (
+                    {availableRoles.map(role => (
                       <button
-                        key={u.id}
+                        key={role}
                         onClick={() => {
-                          switchRole(u.id);
-                          setShowRoleSwitcher(false);
-                          navigate('/dashboard');
+                          void switchRole(role).then(changed => {
+                            if (changed) { setShowRoleSwitcher(false); navigate('/dashboard'); }
+                          });
                         }}
                         className={`w-full text-left px-3 py-2 rounded-xl text-xs transition-colors flex items-center justify-between ${
-                          user.id === u.id
+                          user.role === role
                             ? 'bg-[#13315c] text-amber-300 font-bold'
                             : 'text-slate-300 hover:bg-slate-800/80'
                         }`}
                       >
                         <div>
-                          <p className="leading-tight">{u.label}</p>
-                          <p className="text-[10px] text-slate-400">{u.rank}</p>
+                          <p className="leading-tight capitalize">{role}</p>
+                          <p className="text-[10px] text-slate-400">Authorized view</p>
                         </div>
-                        <span className="text-[9px] px-1.5 py-0.5 rounded bg-slate-900/60 text-slate-300 border border-slate-700">
-                          {u.tier}
-                        </span>
                       </button>
                     ))}
                   </div>

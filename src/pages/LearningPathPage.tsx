@@ -1,8 +1,12 @@
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useCapacity } from '../context/CapacityContext';
 import { learningPaths } from '../data/mockData';
 import { structuredCourses } from '../data/learningData';
+import { isSupabaseConfigured, supabase } from '../lib/supabase';
+import { getCourseRecommendations } from '../lib/recommendations';
+import type { Course } from '../types';
 import { CheckCircle, Circle, Lock, BookOpen, ClipboardCheck, Award, ChevronRight, Clock } from 'lucide-react';
 import { StateEmblem } from '../components/ui/SharedComponents';
 
@@ -21,13 +25,28 @@ const TYPE_ICONS = {
 
 export default function LearningPathPage() {
   const { user } = useAuth();
-  const { isLoopCompleted, competenciesByUser } = useCapacity();
+  const { isLoopCompleted, competenciesByUser, enrollments } = useCapacity();
   const navigate = useNavigate();
+  const [mappedCourses, setMappedCourses] = useState<Course[]>(isSupabaseConfigured ? [] : structuredCourses);
+
+  useEffect(() => {
+    if (!isSupabaseConfigured || !supabase) return;
+    const client = supabase;
+    async function loadMappedCourses() {
+      const { data } = await client.from('course_competencies').select('course_id, competency_id');
+      const ids = Array.from(new Set((data || []).map(item => item.course_id)));
+      if (ids.length === 0) return;
+      const { data: courses } = await client.from('courses').select('*').in('id', ids).in('content_status', ['Approved', 'Published']);
+      setMappedCourses((courses || []).map(course => ({ id: String(course.id), title: course.title || 'Untitled course', description: course.description || '', category: course.category || 'General', duration: `${course.duration_weeks || 1} Weeks`, durationMinutes: (course.duration_weeks || 1) * 180, level: course.level === 'Advanced' || course.level === 'Intermediate' ? course.level : 'Beginner', tags: [], thumbnail: 'CC', instructor: 'Capacity Connect', modules: course.duration_weeks || 1, enrolledCount: 0, rating: 0, competencyIds: (data || []).filter(item => item.course_id === course.id).map(item => item.competency_id), weeks: course.duration_weeks || 1, weeklyEffort: '3 hours/week', published: true })));
+    }
+    void loadMappedCourses();
+  }, []);
 
   if (!user) return null;
   const competencies = competenciesByUser[user.id] || [];
   const priority = [...competencies].sort((a, b) => (b.required - b.current) - (a.required - a.current))[0];
-  const recommendedCourses = priority ? structuredCourses.filter(course => course.competencyIds.includes(priority.id)) : [];
+  const completedCourseIds = enrollments.filter(enrollment => enrollment.userId === user.id && enrollment.completedAt).map(enrollment => enrollment.courseId);
+  const recommendations = getCourseRecommendations(competencies, mappedCourses, completedCourseIds);
 
   return (
     <div className="p-6 md:p-8 max-w-5xl mx-auto animate-fade-in space-y-8">
@@ -122,7 +141,7 @@ export default function LearningPathPage() {
           {competencies.map(competency => <button key={competency.id} onClick={() => document.getElementById(`recommendation-${competency.id}`)?.scrollIntoView({ behavior: 'smooth' })} className={`px-3 py-2 rounded-xl border text-xs font-bold ${competency.id === priority?.id ? 'bg-[#0b2545] text-white border-[#0b2545]' : 'bg-slate-50 text-slate-700 border-slate-200'}`}>{competency.name}</button>)}
         </div>
         <div id={`recommendation-${priority?.id || 'none'}`} className="grid md:grid-cols-3 gap-3">
-          {recommendedCourses.map(course => <div key={course.id} className="p-4 rounded-2xl border border-slate-200 bg-slate-50"><p className="text-sm font-bold text-slate-900">{course.title}</p><p className="text-[11px] text-slate-500 mt-1">{course.duration} • {course.weeklyEffort}</p><p className="text-[11px] text-[#0b2545] font-semibold mt-2">Recommended for your {priority?.name} gap</p><button onClick={() => navigate('/courses')} className="mt-3 px-3 py-2 rounded-lg bg-[#0b2545] text-white text-[11px] font-bold">View course</button></div>)}
+              {recommendations.length > 0 ? recommendations.map(({ course, competency, gap }) => <div key={course.id} className="p-4 rounded-2xl border border-slate-200 bg-slate-50"><p className="text-sm font-bold text-slate-900">{course.title}</p><p className="text-[11px] text-slate-500 mt-1">{course.duration} • {course.weeklyEffort}</p><p className="text-[11px] text-[#0b2545] font-semibold mt-2">Recommended for your {competency.name} gap ({gap} points)</p><button onClick={() => navigate('/courses')} className="mt-3 px-3 py-2 rounded-lg bg-[#0b2545] text-white text-[11px] font-bold">View course</button></div>) : <div className="md:col-span-3 p-5 rounded-2xl border border-dashed border-slate-300 text-sm text-slate-500">Complete more learning activities to receive personalized recommendations.</div>}
         </div>
       </div>
 

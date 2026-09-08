@@ -1,7 +1,8 @@
-import { useState } from 'react';
+import { isSupabaseConfigured, supabase, type Database } from '../lib/supabase';
+import { useEffect, useState } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { useCapacity } from '../context/CapacityContext';
-import { structuredCourses } from '../data/learningData';
+import { createFallbackCourseWeeks, structuredCourses } from '../data/learningData';
 import type { Course, CourseWeek } from '../types';
 import { Badge, ProgressBar, StateEmblem } from '../components/ui/SharedComponents';
 import { Search, BookOpen, Clock, Star, Play, CheckCircle, Plus, X, Award, Lock, ClipboardCheck, FileText } from 'lucide-react';
@@ -10,13 +11,123 @@ import toast from 'react-hot-toast';
 const LEVELS = ['All', 'Beginner', 'Intermediate', 'Advanced'];
 const DURATIONS = ['All', '4 Weeks', '6 Weeks', '8 Weeks'];
 
+type SupabaseCourseRow = Database['public']['Tables']['courses']['Row'];
+
+function toDurationWeeks(value: number | null, fallback = 4) {
+  return Number.isInteger(value) && value && value > 0 ? value : fallback;
+}
+
+function toCourseLevel(value: string | null): Course['level'] {
+  return value === 'Intermediate' || value === 'Advanced' ? value : 'Beginner';
+}
+
+function mapSupabaseCourse(course: SupabaseCourseRow): Course {
+  const durationWeeks = toDurationWeeks(course.duration_weeks);
+  const title = course.title?.trim() || 'Untitled course';
+  const category = course.category?.trim() || 'General';
+
+  return {
+    id: String(course.id),
+    title,
+    description: course.description?.trim() || 'A structured capability programme from the Capacity Connect catalogue.',
+    category,
+    duration: `${durationWeeks} Weeks`,
+    durationMinutes: durationWeeks * 180,
+    level: toCourseLevel(course.level),
+    tags: [category.toLowerCase()],
+    thumbnail: title.split(/\s+/).map(word => word[0]).join('').slice(0, 2).toUpperCase(),
+    instructor: 'Capacity Connect',
+    modules: durationWeeks,
+    enrolledCount: 0,
+    rating: 0,
+    competencyIds: [],
+    weeks: durationWeeks,
+    weeklyEffort: '3 hours/week',
+    prerequisites: [],
+    outcomes: [],
+    published: true,
+    source: course.source?.trim() || 'Capacity Connect catalogue',
+    sourceUrl: course.source_url || undefined,
+    isOfficial: course.is_official ?? false,
+    isPublished: course.is_published ?? true,
+    sequentialUnlock: course.sequential_unlock ?? true,
+  };
+}
+
 export default function CoursesPage() {
   const { user } = useAuth();
-  const { enrollments, enrollInCourse, learningProgress, completeResource, submitWeeklyQuiz, submitAssignment, completeCourse, customCourses, createCourse, getWeeksForCourse } = useCapacity();
+  const { enrollments, enrollInCourse, learningProgress, completeResource, submitWeeklyQuiz, submitAssignment, completeCourse, customCourses, createCourse, registerCourseWeeks, getWeeksForCourse } = useCapacity();
   const [search, setSearch] = useState('');
   const [level, setLevel] = useState('All');
   const [duration, setDuration] = useState('All');
   const [skill, setSkill] = useState('All');
+  const [supabaseCourses, setSupabaseCourses] = useState<Course[]>([]);
+  const [coursesLoading, setCoursesLoading] = useState(true);
+  const [coursesError, setCoursesError] = useState<string | null>(null);
+  useEffect(() => {
+    async function loadCourses() {
+      setCoursesLoading(true);
+      setCoursesError(null);
+
+      if (!isSupabaseConfigured || !supabase) {
+        setCoursesError('Supabase is not configured for this environment.');
+        setCoursesLoading(false);
+        return;
+      }
+
+      const { data, error } = await supabase
+        .from('courses')
+        .select('*')
+        .order('created_at', { ascending: false });
+
+      if (error) {
+        console.error('Error loading courses:', error);
+        setCoursesError('Could not load courses from Supabase.');
+        toast.error('Could not load courses from Supabase');
+        setCoursesLoading(false);
+        return;
+      }
+
+      const mappedCourses = (data ?? []).map(mapSupabaseCourse);
+      const remoteWeeks: CourseWeek[] = [];
+      for (const course of data ?? []) {
+        const courseId = String(course.id);
+        const { data: weeks } = await supabase.from('course_weeks').select('*').eq('course_id', courseId).order('week_number');
+        for (const week of weeks ?? []) {
+          const { data: videos } = await supabase.from('course_videos').select('*').eq('week_id', week.id).order('order_index');
+          const { data: quizzes } = await supabase.from('quizzes').select('*').eq('week_id', week.id).limit(1);
+          const quiz = quizzes?.[0];
+          const questions = quiz ? (await supabase.from('quiz_questions').select('*').eq('quiz_id', quiz.id).order('order_index')).data ?? [] : [];
+          const { data: assignments } = await supabase.from('assignments').select('*').eq('week_id', week.id).limit(1);
+          const start = new Date(2026, 8, 7 + (week.week_number - 1) * 7);
+          const end = new Date(start); end.setDate(start.getDate() + 6);
+          const resolvedVideos = videos && videos.length > 0 ? videos : [{
+            id: `${week.id}-default-video`,
+            week_id: week.id,
+            title: `${week.title} guided session`,
+            description: 'Default learning video for this module when no explicit video has been uploaded yet.',
+            video_url: 'https://www.youtube.com/watch?v=5qap5aO4i9A',
+            transcript: `This learning resource introduces the key concepts for ${week.title}. Review the module, reflect on the examples, and complete the check for understanding before moving ahead.`,
+            transcript_language: 'en',
+            duration_minutes: 28,
+            order_index: 1,
+            created_at: new Date().toISOString(),
+          }];
+          remoteWeeks.push({
+            id: week.id, courseId, weekNumber: week.week_number, title: week.title, startsOn: start.toISOString().slice(0, 10), endsOn: end.toISOString().slice(0, 10),
+            resources: resolvedVideos.map(video => ({ id: video.id, type: 'video', title: video.title, description: `${video.description}${video.transcript ? `\n\nTranscript (${video.transcript_language}):\n${video.transcript}` : '\n\nTranscript not available yet.'}`, durationMinutes: video.duration_minutes ?? undefined, url: video.video_url ?? undefined, transcript: video.transcript ?? undefined, transcriptLanguage: video.transcript_language })),
+            quiz: { id: quiz?.id || `${week.id}-quiz`, title: quiz?.title || `${week.title} knowledge check`, passingScore: quiz?.passing_score || 70, questions: questions.map(question => ({ id: question.id, text: question.question, options: [question.option_a, question.option_b, question.option_c, question.option_d], correctIndex: question.correct_answer, explanation: question.explanation })) },
+            assignment: { id: assignments?.[0]?.id || `${week.id}-assignment`, title: assignments?.[0]?.title || `${week.title} assignment`, description: assignments?.[0]?.description || 'Apply the learning from this week.', instructions: assignments?.[0]?.instructions || 'Write a short workplace response.', deadline: assignments?.[0]?.deadline || end.toISOString().slice(0, 10) },
+          });
+        }
+      }
+      setSupabaseCourses(mappedCourses);
+      registerCourseWeeks(mappedCourses.flatMap(course => remoteWeeks.some(week => week.courseId === course.id) ? remoteWeeks.filter(week => week.courseId === course.id) : createFallbackCourseWeeks(course.id, course.title, course.weeks || 4)));
+      setCoursesLoading(false);
+    }
+
+    void loadCourses();
+  }, [registerCourseWeeks]);
   const [activeCourse, setActiveCourse] = useState<Course | null>(null);
   const [activeWeek, setActiveWeek] = useState(1);
   const [quizAnswers, setQuizAnswers] = useState<Record<string, number>>({});
@@ -25,12 +136,14 @@ export default function CoursesPage() {
   const [builderTitle, setBuilderTitle] = useState('');
   const [builderWeeks, setBuilderWeeks] = useState(4);
 
+
+
   if (!user) return null;
   const currentUser = user;
   const myEnrollments = enrollments.filter(item => item.userId === user.id);
   const enrolledMap = new Map(myEnrollments.map(item => [item.courseId, item]));
   const progressFor = (courseId: string) => learningProgress.find(item => item.userId === user.id && item.courseId === courseId);
-  const allCourses = [...structuredCourses, ...customCourses];
+  const allCourses = [...structuredCourses, ...customCourses, ...supabaseCourses];
   const filtered = allCourses.filter(course => {
     const searchable = [course.title, course.description, course.category, course.instructor, ...course.tags].join(' ').toLowerCase();
     return searchable.includes(search.toLowerCase()) && (level === 'All' || course.level === level) && (duration === 'All' || course.duration === duration) && (skill === 'All' || course.competencyIds.includes(skill));
@@ -65,7 +178,13 @@ export default function CoursesPage() {
   }
 
   const activeProgress = activeCourse ? progressFor(activeCourse.id) : undefined;
-  const activeWeeks = activeCourse ? getWeeksForCourse(activeCourse.id) : [];
+  const activeWeeks = activeCourse
+    ? getWeeksForCourse(activeCourse.id).length > 0
+      ? getWeeksForCourse(activeCourse.id)
+      : supabaseCourses.some(course => course.id === activeCourse.id)
+        ? createFallbackCourseWeeks(activeCourse.id, activeCourse.title, activeCourse.weeks || 4)
+        : []
+    : [];
   const activeWeekData = activeWeeks.find(item => item.weekNumber === activeWeek);
   const completedPercent = activeCourse ? Math.round(((activeProgress?.completedWeeks.length || 0) / (activeCourse.weeks || 1)) * 100) : 0;
 
@@ -81,6 +200,8 @@ export default function CoursesPage() {
   }
 
   return <div className="p-6 md:p-8 max-w-7xl mx-auto animate-fade-in space-y-8">
+    {coursesLoading && <div className="gov-card px-5 py-3 text-xs font-semibold text-slate-500">Loading courses from Supabase...</div>}
+    {coursesError && <div className="gov-card px-5 py-3 text-xs font-semibold text-amber-800 border-amber-200">{coursesError} Existing catalogue courses remain available.</div>}
     <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-6 border-b border-slate-200">
       <div><span className="text-[10px] font-bold uppercase tracking-wider text-[#ff9933] bg-orange-50 px-2.5 py-0.5 rounded border border-orange-200">Structured learning repository</span><h1 className="text-3xl font-black text-[#0b2545] tracking-tight mt-2">Course Catalogue</h1><p className="text-xs text-slate-500 font-medium mt-1">Choose a capability, follow the weekly plan, and verify improvement through assessment.</p></div>
       <div className="flex items-center gap-3 bg-white p-3 rounded-2xl border border-slate-200"><StateEmblem className="w-7 h-9" /><div className="border-l border-slate-200 pl-3"><p className="text-sm font-black text-[#0b2545]">{myEnrollments.length} Enrolled</p><p className="text-[10px] text-emerald-700 font-bold">Weekly gates enabled</p></div></div>

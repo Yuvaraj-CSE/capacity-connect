@@ -1,7 +1,8 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { useCapacity } from '../context/CapacityContext';
-import { users, courses } from '../data/mockData';
+import { isSupabaseConfigured, supabase } from '../lib/supabase';
+import { users as demoUsers, enrollments as demoEnrollments, courses as demoCourses, competenciesByUser as demoCompetencies } from '../data/mockData';
 import { StatCard, ProgressBar, Avatar, ScorePill, StateEmblem } from '../components/ui/SharedComponents';
 import {
   Users, Brain, AlertTriangle, BookOpen, Send,
@@ -9,35 +10,88 @@ import {
 } from 'lucide-react';
 import toast from 'react-hot-toast';
 
+type TeamMember = { id: string; name: string; email: string; role: 'learner'; department: string; position: string; avatar: string };
+type TeamEnrollment = { user_id: string; course_id: string; enrolled_at: string; completed_at: string | null };
+type TeamAttempt = { user_id: string; score: number; passed: boolean };
+type TeamCompetency = { user_id: string; competency_id: string; current_score: number; required_score: number };
+
 export default function TeamAnalyticsPage() {
   const { user } = useAuth();
-  const { competenciesByUser, enrollments, departments, isLoopCompleted } = useCapacity();
-  const [selectedMemberId, setSelectedMemberId] = useState<string>('u1');
+  const { departments, isLoopCompleted } = useCapacity();
+  const [selectedMemberId, setSelectedMemberId] = useState<string>('');
   const [searchMember, setSearchMember] = useState('');
+  const [teamMembers, setTeamMembers] = useState<TeamMember[]>([]);
+  const [teamEnrollments, setTeamEnrollments] = useState<TeamEnrollment[]>([]);
+  const [teamAttempts, setTeamAttempts] = useState<TeamAttempt[]>([]);
+  const [teamCompetencies, setTeamCompetencies] = useState<TeamCompetency[]>([]);
+  const [courseNames, setCourseNames] = useState<Record<string, string>>({});
+  const [competencyNames, setCompetencyNames] = useState<Record<string, string>>({});
+  const [loading, setLoading] = useState(true);
+
+  const currentDept = user ? departments.find(d => d.headId === user.id) : undefined;
+
+  useEffect(() => {
+    async function loadTeamData() {
+      if (localStorage.getItem('capacity_connect_demo_user') === 'meera@capacityconnect.in') {
+        const demoDepartment = demoUsers.find(candidate => candidate.id === 'u6')?.department || 'Engineering';
+        const members = demoUsers.filter(candidate => candidate.department === demoDepartment && candidate.role === 'learner').map(member => ({ id: member.id, name: member.name, email: member.email, role: 'learner' as const, department: member.department, position: member.position, avatar: member.avatar }));
+        setTeamMembers(members);
+        setSelectedMemberId(previous => previous || members[0]?.id || '');
+        setTeamEnrollments(demoEnrollments.filter(enrollment => members.some(member => member.id === enrollment.userId)).map(enrollment => ({ user_id: enrollment.userId, course_id: enrollment.courseId, enrolled_at: enrollment.startedAt, completed_at: enrollment.completedAt || null })));
+        setTeamCompetencies(members.flatMap(member => (demoCompetencies[member.id] || []).map(competency => ({ user_id: member.id, competency_id: competency.id, current_score: competency.current, required_score: competency.required }))));
+        setCourseNames(Object.fromEntries(demoCourses.map(course => [course.id, course.title])));
+        setCompetencyNames(Object.fromEntries(Object.values(demoCompetencies).flat().map(competency => [competency.id, competency.name])));
+        setLoading(false);
+        return;
+      }
+      if (!supabase || !isSupabaseConfigured || !user || !currentDept) {
+        setLoading(false);
+        return;
+      }
+      setLoading(true);
+      const { data: profiles } = await supabase.from('profiles').select('id, full_name, email, role, department, position, avatar').eq('department', currentDept.name).eq('role', 'learner');
+      const members = (profiles || []).map(profile => ({ id: profile.id, name: profile.full_name, email: profile.email || '', role: 'learner' as const, department: profile.department, position: profile.position, avatar: profile.avatar }));
+      const memberIds = members.map(member => member.id);
+      setTeamMembers(members);
+      setSelectedMemberId(previous => previous || members[0]?.id || '');
+      if (memberIds.length === 0) {
+        setTeamEnrollments([]); setTeamAttempts([]); setTeamCompetencies([]); setLoading(false); return;
+      }
+      const [{ data: enrollments }, { data: attempts }, { data: competencies }, { data: courses }, { data: competencyDefinitions }] = await Promise.all([
+        supabase.from('enrollments').select('user_id, course_id, enrolled_at, completed_at').in('user_id', memberIds),
+        supabase.from('quiz_attempts').select('user_id, score, passed').in('user_id', memberIds),
+        supabase.from('user_competencies').select('user_id, competency_id, current_score, required_score').in('user_id', memberIds),
+        supabase.from('courses').select('id, title'),
+        supabase.from('competencies').select('id, name'),
+      ]);
+      setTeamEnrollments(enrollments || []);
+      setTeamAttempts(attempts || []);
+      setTeamCompetencies(competencies || []);
+      setCourseNames(Object.fromEntries((courses || []).map(course => [String(course.id), course.title || 'Untitled course'])));
+      setCompetencyNames(Object.fromEntries((competencyDefinitions || []).map(competency => [competency.id, competency.name])));
+      setLoading(false);
+    }
+    void loadTeamData();
+  }, [currentDept, user]);
 
   if (!user) return null;
-
-  const currentDept = departments.find(d => d.headId === user.id) || departments[0];
-  const teamMembers = users.filter(u => u.department === currentDept.name && u.role === 'learner');
 
   const filteredMembers = teamMembers.filter(m =>
     m.name.toLowerCase().includes(searchMember.toLowerCase()) ||
     m.position.toLowerCase().includes(searchMember.toLowerCase())
   );
 
-  const selectedMember = users.find(u => u.id === selectedMemberId) || teamMembers[0] || users[0];
-  const memberComps = competenciesByUser[selectedMember.id] || [];
-  const memberEnrollments = enrollments.filter(e => e.userId === selectedMember.id);
+  const selectedMember = teamMembers.find(member => member.id === selectedMemberId) || teamMembers[0];
+  const selectedCompetencies = selectedMember ? teamCompetencies.filter(item => item.user_id === selectedMember.id) : [];
+  const memberEnrollments = selectedMember ? teamEnrollments.filter(item => item.user_id === selectedMember.id) : [];
 
   // Compute live team capability average
-  const teamCapabilityAvg = Math.round(
-    teamMembers.reduce((sum, member) => {
-      const comps = competenciesByUser[member.id] || [];
-      if (!comps.length) return sum;
-      const memScore = comps.reduce((acc, c) => acc + Math.min(c.current / c.required, 1), 0) / comps.length;
-      return sum + memScore * 100;
-    }, 0) / Math.max(teamMembers.length, 1)
-  );
+  const teamCapabilityScores = teamMembers.map(member => {
+    const comps = teamCompetencies.filter(item => item.user_id === member.id);
+    return comps.length ? comps.reduce((sum, item) => sum + Math.min(item.current_score / Math.max(item.required_score, 1), 1) * 100, 0) / comps.length : null;
+  }).filter((score): score is number => score !== null);
+  const teamCapabilityAvg = teamCapabilityScores.length ? Math.round(teamCapabilityScores.reduce((sum, score) => sum + score, 0) / teamCapabilityScores.length) : null;
+  const averageAssessment = teamAttempts.length ? Math.round(teamAttempts.reduce((sum, attempt) => sum + attempt.score, 0) / teamAttempts.length) : null;
 
   const matrixCompetencies = [
     'Digital Readiness',
@@ -49,7 +103,7 @@ export default function TeamAnalyticsPage() {
   ];
 
   function handleRecommendCourse(memberName: string, courseTitle: string) {
-    toast.success(`Learning prescription for "${courseTitle}" assigned to ${memberName}!`, { icon: '📋' });
+    toast.success(`Recommendation recorded for ${memberName}: ${courseTitle}.`);
   }
 
   function handleScheduleReview(memberName: string) {
@@ -63,7 +117,7 @@ export default function TeamAnalyticsPage() {
         <div>
           <div className="flex items-center gap-2 mb-1">
             <span className="text-[10px] font-bold uppercase tracking-wider text-[#ff9933] bg-orange-50 px-2.5 py-0.5 rounded border border-orange-200">
-              Divisional Oversight • {currentDept.name} Department
+              Divisional Oversight {currentDept ? `• ${currentDept.name} Department` : ''}
             </span>
           </div>
           <h1 className="text-3xl font-black text-[#0b2545] tracking-tight">
@@ -77,14 +131,14 @@ export default function TeamAnalyticsPage() {
         <div className="flex items-center gap-3 bg-white p-3 rounded-2xl border border-slate-200 shadow-xs">
           <StateEmblem className="w-7 h-9 flex-shrink-0" />
           <div className="border-l border-slate-200 pl-3">
-            <p className="text-sm font-black text-[#0b2545]">{teamMembers.length} Direct Reports</p>
+            <p className="text-sm font-black text-[#0b2545]">{teamMembers.length || 'No'} Direct Reports</p>
             <p className="text-[10px] text-slate-400 font-semibold">Under Manager Review</p>
           </div>
         </div>
       </div>
 
       {/* Closed-Loop Verification Note for Manager */}
-      {isLoopCompleted && (
+    {isLoopCompleted && teamMembers.length > 0 && (
         <div className="bg-emerald-50 border border-emerald-300 rounded-2xl p-4 flex items-start gap-3">
           <ShieldCheck size={20} className="text-emerald-700 flex-shrink-0 mt-0.5" />
           <div>
@@ -102,28 +156,26 @@ export default function TeamAnalyticsPage() {
       <div className="grid grid-cols-2 md:grid-cols-4 gap-5">
         <StatCard
           label="Division Capability Score"
-          value={`${teamCapabilityAvg}%`}
-          sub="Benchmark: 75% required"
+          value={teamCapabilityAvg === null ? 'No data yet' : `${teamCapabilityAvg}%`}
+          sub="Calculated from persisted competencies"
           icon={<Brain size={20} />}
           color="blue"
-          trend={isLoopCompleted ? 6 : 2}
           badge="Live Index"
         />
         <StatCard
           label="Managed Staff"
-          value={teamMembers.length}
-          sub="Engineers & Officers"
+          value={teamMembers.length || 'No team data available yet'}
+          sub="Persisted learner profiles"
           icon={<Users size={20} />}
           color="teal"
         />
         <StatCard
           label="Critical Deficits"
-          value={
+          value={teamCompetencies.length === 0 ? 'No data yet' :
             teamMembers.reduce((count, m) => {
-              const comps = competenciesByUser[m.id] || [];
-              return count + comps.filter(c => c.required - c.current > 20).length;
-            }, 0)
-          }
+              const comps = teamCompetencies.filter(item => item.user_id === m.id);
+              return count + comps.filter(item => item.required_score - item.current_score > 20).length;
+            }, 0)}
           sub="Deficits > 20 points"
           icon={<AlertTriangle size={20} />}
           color={isLoopCompleted ? 'green' : 'red'}
@@ -131,11 +183,15 @@ export default function TeamAnalyticsPage() {
         />
         <StatCard
           label="Active Training Programs"
-          value={enrollments.filter(e => teamMembers.some(m => m.id === e.userId)).length}
-          sub="Courses in progress"
+          value={teamEnrollments.length || 'No data yet'}
+          sub="Persisted course enrollments"
           icon={<BookOpen size={20} />}
           color="gold"
         />
+      </div>
+      <div className="gov-card p-5 flex items-center justify-between gap-4">
+        <div><p className="text-[10px] uppercase font-bold text-slate-400">Average assessment score</p><p className="text-2xl font-black text-[#0b2545] mt-1">{averageAssessment === null ? 'No data yet' : `${averageAssessment}%`}</p></div>
+        <p className="text-xs text-slate-500">Calculated from persisted team quiz attempts</p>
       </div>
 
       {/* Team Competency Heatmap / Matrix */}
@@ -171,9 +227,11 @@ export default function TeamAnalyticsPage() {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100 text-sm">
-              {filteredMembers.map(member => {
-                const comps = competenciesByUser[member.id] || [];
-                const isSelected = member.id === selectedMember.id;
+              {loading && <tr><td colSpan={8} className="py-8 text-center text-xs text-slate-500">Loading team data...</td></tr>}
+              {!loading && filteredMembers.length === 0 && <tr><td colSpan={8} className="py-8 text-center text-xs text-slate-500">No team data available yet</td></tr>}
+              {!loading && filteredMembers.map(member => {
+                const comps = teamCompetencies.filter(item => item.user_id === member.id);
+                const isSelected = member.id === selectedMember?.id;
 
                 return (
                   <tr
@@ -194,13 +252,13 @@ export default function TeamAnalyticsPage() {
                     </td>
 
                     {matrixCompetencies.map(compName => {
-                      const found = comps.find(c =>
-                        c.name.toLowerCase().includes(compName.toLowerCase().slice(0, 5))
-                      );
-                      const score = found ? found.current : 60;
-                      const isTargetMet = found ? found.current >= found.required : score >= 75;
+                      const found = comps.find(c => (competencyNames[c.competency_id] || c.competency_id).toLowerCase().includes(compName.toLowerCase().slice(0, 5)));
+                      const score = found?.current_score;
+                      const isTargetMet = found ? found.current_score >= found.required_score : false;
 
-                      const colorClass = isTargetMet
+                      const colorClass = score === undefined
+                        ? 'bg-slate-50 text-slate-500 border-slate-200'
+                        : isTargetMet
                         ? 'bg-emerald-50 text-emerald-800 border-emerald-300'
                         : score >= 55
                         ? 'bg-amber-50 text-amber-800 border-amber-300'
@@ -209,7 +267,7 @@ export default function TeamAnalyticsPage() {
                       return (
                         <td key={compName} className="py-4 px-4 text-center">
                           <span className={`inline-block px-2.5 py-1 rounded-lg text-xs font-bold border ${colorClass}`}>
-                            {score}%
+                            {score === undefined ? 'No data' : `${score}%`}
                           </span>
                         </td>
                       );
@@ -239,18 +297,19 @@ export default function TeamAnalyticsPage() {
         <div className="lg:col-span-2 gov-card p-6">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-6 border-b border-slate-100 mb-6">
             <div className="flex items-center gap-4">
-              <Avatar initials={selectedMember.avatar} size="lg" />
+              <Avatar initials={selectedMember?.avatar || 'NA'} size="lg" />
               <div>
-                <h3 className="text-xl font-black text-slate-900">{selectedMember.name}</h3>
+                <h3 className="text-xl font-black text-slate-900">{selectedMember?.name || 'No team member selected'}</h3>
                 <p className="text-xs text-slate-500 font-medium">
-                  {selectedMember.position} • {selectedMember.department} Division
+                  {selectedMember ? `${selectedMember.position} • ${selectedMember.department} Division` : 'No team data available yet'}
                 </p>
-                <p className="text-[11px] text-slate-400 font-mono mt-0.5">{selectedMember.email}</p>
+                <p className="text-[11px] text-slate-400 font-mono mt-0.5">{selectedMember?.email || ''}</p>
               </div>
             </div>
 
             <button
-              onClick={() => handleScheduleReview(selectedMember.name)}
+              onClick={() => selectedMember && handleScheduleReview(selectedMember.name)}
+              disabled={!selectedMember}
               className="px-4 py-2 bg-[#0b2545] text-white rounded-xl text-xs font-bold hover:bg-[#13315c] transition-colors shadow-xs"
             >
               Conduct Performance Audit
@@ -261,23 +320,22 @@ export default function TeamAnalyticsPage() {
             Individual Competency Gap Scorecard
           </h4>
           <div className="space-y-4">
-            {memberComps.map(c => {
-              const gap = c.required - c.current;
+            {selectedCompetencies.map(c => {
+              const gap = c.required_score - c.current_score;
               return (
-                <div key={c.id} className="p-4 bg-slate-50 rounded-2xl border border-slate-200/80">
+                <div key={`${c.user_id}-${c.competency_id}`} className="p-4 bg-slate-50 rounded-2xl border border-slate-200/80">
                   <div className="flex items-center justify-between mb-2">
                     <div>
-                      <span className="font-bold text-sm text-slate-900">{c.name}</span>
-                      <span className="text-xs text-slate-400 ml-2">({c.category})</span>
+                      <span className="font-bold text-sm text-slate-900">{competencyNames[c.competency_id] || c.competency_id}</span>
                     </div>
                     <div className="flex items-center gap-2">
-                      <ScorePill value={c.current} />
-                      <span className="text-xs text-slate-500">Benchmark: {c.required}%</span>
+                      <ScorePill value={c.current_score} />
+                      <span className="text-xs text-slate-500">Benchmark: {c.required_score}%</span>
                     </div>
                   </div>
                   <ProgressBar
-                    value={c.current}
-                    required={c.required}
+                    value={c.current_score}
+                    required={c.required_score}
                     color={gap > 20 ? 'red' : gap > 0 ? 'orange' : 'green'}
                     size="sm"
                   />
@@ -287,7 +345,7 @@ export default function TeamAnalyticsPage() {
                         Critical deficit requires immediate learning prescription
                       </span>
                       <button
-                        onClick={() => handleRecommendCourse(selectedMember.name, c.name + ' Acceleration')}
+                        onClick={() => selectedMember && handleRecommendCourse(selectedMember.name, `${competencyNames[c.competency_id] || c.competency_id} Acceleration`)}
                         className="text-xs font-bold text-[#0b2545] hover:underline flex items-center gap-1"
                       >
                         <Send size={12} /> Prescribe Pathway
@@ -308,16 +366,13 @@ export default function TeamAnalyticsPage() {
             </h4>
             <div className="space-y-3">
               {memberEnrollments.map(e => {
-                const c = courses.find(course => course.id === e.courseId);
-                if (!c) return null;
-
                 return (
-                  <div key={e.courseId} className="p-3.5 bg-slate-50 rounded-2xl border border-slate-200">
+                  <div key={e.course_id} className="p-3.5 bg-slate-50 rounded-2xl border border-slate-200">
                     <div className="flex items-center justify-between mb-1.5">
-                      <p className="text-xs font-bold text-slate-900 truncate">{c.title}</p>
-                      <span className="text-xs font-bold text-[#0b2545]">{e.progress}%</span>
+                      <p className="text-xs font-bold text-slate-900 truncate">{courseNames[e.course_id] || e.course_id}</p>
+                      <span className="text-xs font-bold text-[#0b2545]">{e.completed_at ? 'Completed' : 'Active'}</span>
                     </div>
-                    <ProgressBar value={e.progress} color={e.progress === 100 ? 'green' : 'blue'} size="sm" />
+                    <ProgressBar value={e.completed_at ? 100 : 0} color={e.completed_at ? 'green' : 'blue'} size="sm" />
                   </div>
                 );
               })}
@@ -330,9 +385,9 @@ export default function TeamAnalyticsPage() {
             </div>
             <h4 className="text-base font-bold">Executive Recommendation</h4>
             <p className="text-xs text-slate-300 mt-1 leading-relaxed">
-              {isLoopCompleted
-                ? 'Arjun Sharma has successfully closed his Data Analytics gap. The division is currently meeting all critical FRAC capability baselines.'
-                : 'Arjun Sharma is enrolled in Excel for Business Analysis. Ensure he completes the upcoming proctored assessment to clear the division deficit.'}
+              {averageAssessment === null
+                ? 'No assessment data available yet.'
+                : `Team average assessment score: ${averageAssessment}%. Review members with persistent competency gaps and recommend targeted learning.`}
             </p>
           </div>
         </div>

@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from 'react';
 import type { Competency, Enrollment, Certificate, RiskAlert, Department, LearningProgress, QuizAttempt, AssignmentSubmission, Course, CourseWeek } from '../types';
 import {
   competenciesByUser as initialComps,
@@ -12,6 +12,7 @@ import {
 import toast from 'react-hot-toast';
 import { translate, type LanguageMode } from '../translations';
 import { structuredCourses, getCourseWeeks } from '../data/learningData';
+import { isSupabaseConfigured, supabase } from '../lib/supabase';
 
 export type { LanguageMode };
 export type TextScale = 'normal' | 'large' | 'larger';
@@ -52,6 +53,7 @@ interface CapacityContextValue {
   customCourses: Course[];
   customCourseWeeks: CourseWeek[];
   createCourse: (course: Course, weeks: CourseWeek[]) => void;
+  registerCourseWeeks: (weeks: CourseWeek[]) => void;
   getWeeksForCourse: (courseId: string) => CourseWeek[];
 
   // Closed Loop Stepper Tracking
@@ -75,7 +77,8 @@ interface CapacityContextValue {
 const CapacityContext = createContext<CapacityContextValue | null>(null);
 
 export function CapacityProvider({ children }: { children: ReactNode }) {
-  const [comps, setComps] = useState<Record<string, Competency[]>>(JSON.parse(JSON.stringify(initialComps)));
+  const isDemoMode = typeof window !== 'undefined' && Boolean(localStorage.getItem('capacity_connect_demo_user'));
+  const [comps, setComps] = useState<Record<string, Competency[]>>(() => isSupabaseConfigured && !isDemoMode ? {} : JSON.parse(JSON.stringify(initialComps)));
   const [userEnrollments, setUserEnrollments] = useState<Enrollment[]>(JSON.parse(JSON.stringify(initialEnrollments)));
   const [userCerts, setUserCerts] = useState<Certificate[]>(JSON.parse(JSON.stringify(initialCerts)));
   const [alerts, setAlerts] = useState<RiskAlert[]>(JSON.parse(JSON.stringify(initialAlerts)));
@@ -94,8 +97,103 @@ export function CapacityProvider({ children }: { children: ReactNode }) {
   const [customCourseWeeks, setCustomCourseWeeks] = useState<CourseWeek[]>(() => {
     try { return JSON.parse(localStorage.getItem('capacity_connect_custom_course_weeks') || '[]'); } catch { return []; }
   });
+  const [registeredCourseWeeks, setRegisteredCourseWeeks] = useState<CourseWeek[]>([]);
 
-  const getWeeksForCourse = (courseId: string) => [...getCourseWeeks(courseId), ...customCourseWeeks.filter(item => item.courseId === courseId)];
+  useEffect(() => {
+    async function loadPersistedLearning() {
+      if (!isSupabaseConfigured || !supabase) return;
+      const { data: sessionData } = await supabase.auth.getSession();
+      const userId = sessionData.session?.user.id;
+      if (!userId) return;
+
+      const [{ data: remoteEnrollments }, { data: remoteVideoProgress }, { data: remoteAttempts }, { data: remoteSubmissions }, { data: videos }, { data: weeks }, { data: quizzes }, { data: assignments }, { data: remoteCompetencies }, { data: remoteDefinitions }, { data: remoteCertificates }] = await Promise.all([
+        supabase.from('enrollments').select('*').eq('user_id', userId),
+        supabase.from('video_progress').select('*').eq('user_id', userId),
+        supabase.from('quiz_attempts').select('*').eq('user_id', userId).order('attempted_at'),
+        supabase.from('assignment_submissions').select('*').eq('user_id', userId).order('submitted_at'),
+        supabase.from('course_videos').select('id, week_id'),
+        supabase.from('course_weeks').select('id, course_id, week_number'),
+        supabase.from('quizzes').select('id, week_id'),
+        supabase.from('assignments').select('id, week_id'),
+        supabase.from('user_competencies').select('user_id, competency_id, current_score, required_score').eq('user_id', userId),
+        supabase.from('competencies').select('id, name, category, description, default_required'),
+        supabase.from('certificates').select('*').eq('user_id', userId).order('issued_date', { ascending: false }),
+      ]);
+
+      if (remoteCompetencies && remoteCompetencies.length > 0) {
+        const definitions = new Map((remoteDefinitions || []).map(item => [item.id, item]));
+        setComps(previous => ({
+          ...previous,
+          [userId]: remoteCompetencies.map(item => ({
+            id: item.competency_id,
+            name: definitions.get(item.competency_id)?.name || item.competency_id,
+            category: definitions.get(item.competency_id)?.category || 'Persisted competency',
+            description: definitions.get(item.competency_id)?.description || 'Competency loaded from the platform record.',
+            current: item.current_score,
+            required: item.required_score,
+          })),
+        }));
+      }
+      if (remoteCertificates && remoteCertificates.length > 0) {
+        setUserCerts(previous => [...previous.filter(certificate => certificate.userId !== userId), ...remoteCertificates.map(certificate => ({ id: certificate.id, userId: certificate.user_id, courseId: certificate.course_id, title: certificate.title, issuedDate: certificate.issued_date, expiryDate: certificate.expiry_date || undefined, verificationStatus: certificate.verification_status }))]);
+      }
+
+      const weekById = new Map((weeks || []).map(week => [week.id, week]));
+      const videoById = new Map((videos || []).map(video => [video.id, video]));
+      const quizById = new Map((quizzes || []).map(quiz => [quiz.id, quiz]));
+      const assignmentById = new Map((assignments || []).map(assignment => [assignment.id, assignment]));
+      const progressByCourse = new Map<string, LearningProgress>();
+      const getRemoteProgress = (courseId: string) => {
+        const existing = progressByCourse.get(courseId);
+        if (existing) return existing;
+        const created: LearningProgress = { userId, courseId, completedResourceIds: [], quizAttempts: [], assignmentSubmissions: [], completedWeeks: [] };
+        progressByCourse.set(courseId, created);
+        return created;
+      };
+
+      for (const progress of remoteVideoProgress || []) {
+        const video = videoById.get(progress.video_id);
+        const week = video && weekById.get(video.week_id);
+        if (week && progress.completed) getRemoteProgress(week.course_id).completedResourceIds.push(progress.video_id);
+      }
+      for (const attempt of remoteAttempts || []) {
+        const quiz = quizById.get(attempt.quiz_id);
+        const week = quiz && weekById.get(quiz.week_id);
+        if (week) {
+          const current = getRemoteProgress(week.course_id);
+          current.quizAttempts.push({ quizId: attempt.quiz_id, score: attempt.score, passed: attempt.passed, answers: attempt.answers, completedAt: attempt.attempted_at });
+          if (attempt.passed) current.completedWeeks.push(week.week_number);
+        }
+      }
+      for (const submission of remoteSubmissions || []) {
+        const assignment = assignmentById.get(submission.assignment_id);
+        const week = assignment && weekById.get(assignment.week_id);
+        if (week) {
+          const current = getRemoteProgress(week.course_id);
+          current.assignmentSubmissions.push({ weekNumber: week.week_number, text: submission.response, submittedAt: submission.submitted_at });
+          if (current.quizAttempts.some(attempt => attempt.quizId === (quizzes || []).find(quiz => quiz.week_id === week.id)?.id && attempt.passed)) current.completedWeeks.push(week.week_number);
+        }
+      }
+
+      setUserEnrollments(previous => [
+        ...previous.filter(enrollment => enrollment.userId !== userId),
+        ...(remoteEnrollments || []).map(enrollment => ({ userId: enrollment.user_id, courseId: enrollment.course_id, progress: enrollment.completed_at ? 100 : 10, startedAt: enrollment.enrolled_at, completedAt: enrollment.completed_at || undefined })),
+      ]);
+      if (progressByCourse.size > 0) setLearningProgress(previous => [...previous.filter(progress => progress.userId !== userId), ...Array.from(progressByCourse.values()).map(progress => ({ ...progress, completedWeeks: Array.from(new Set(progress.completedWeeks)) }))]);
+    }
+
+    void loadPersistedLearning();
+  }, []);
+
+  const getWeeksForCourse = (courseId: string) => [...getCourseWeeks(courseId), ...customCourseWeeks, ...registeredCourseWeeks].filter(item => item.courseId === courseId);
+
+  const registerCourseWeeks = useCallback((weeks: CourseWeek[]) => {
+    const courseIds = new Set(weeks.map(courseWeek => courseWeek.courseId));
+    setRegisteredCourseWeeks(previous => [
+      ...previous.filter(courseWeek => !courseIds.has(courseWeek.courseId)),
+      ...weeks,
+    ]);
+  }, []);
 
   function createCourse(course: Course, weeks: CourseWeek[]) {
     setCustomCourses(previous => {
@@ -284,6 +382,9 @@ export function CapacityProvider({ children }: { children: ReactNode }) {
       });
       return { ...prev, [userId]: updated };
     });
+    if (isSupabaseConfigured && supabase && competency) {
+      void supabase.from('user_competencies').upsert({ user_id: userId, competency_id: competencyId, current_score: newScore, required_score: competency.required });
+    }
 
     // 2. Mint new official GoI Certificate
     const newCert: Certificate = {
@@ -293,8 +394,12 @@ export function CapacityProvider({ children }: { children: ReactNode }) {
       title: `Certified ${competency?.name || 'Competency'} Specialist`,
       issuedDate: new Date().toISOString().slice(0, 10),
       expiryDate: '2029-12-31',
+      verificationStatus: 'valid',
     };
     setUserCerts(prev => [newCert, ...prev]);
+    if (isSupabaseConfigured && supabase) {
+      void supabase.from('certificates').upsert({ id: newCert.id, user_id: newCert.userId, course_id: newCert.courseId, title: newCert.title, issued_date: newCert.issuedDate, expiry_date: newCert.expiryDate, verification_status: 'valid' });
+    }
 
     // 3. Resolve the critical risk alert related to this competency
     setAlerts(prev =>
@@ -373,6 +478,9 @@ export function CapacityProvider({ children }: { children: ReactNode }) {
     updateLearningProgress(previous => previous.some(item => item.userId === userId && item.courseId === courseId)
       ? previous
       : [...previous, { userId, courseId, completedResourceIds: [], quizAttempts: [], assignmentSubmissions: [], completedWeeks: [] }]);
+    if (isSupabaseConfigured && supabase) {
+      void supabase.from('enrollments').upsert({ user_id: userId, course_id: courseId }, { onConflict: 'user_id,course_id' });
+    }
   }
 
   function completeResource(userId: string, courseId: string, resourceId: string) {
@@ -381,31 +489,41 @@ export function CapacityProvider({ children }: { children: ReactNode }) {
       const updated = { ...current, completedResourceIds: Array.from(new Set([...current.completedResourceIds, resourceId])) };
       return [...previous.filter(item => !(item.userId === userId && item.courseId === courseId)), updated];
     });
+    if (isSupabaseConfigured && supabase) {
+      void supabase.from('video_progress').upsert({ user_id: userId, video_id: resourceId, completed: true, completed_at: new Date().toISOString() }, { onConflict: 'user_id,video_id' });
+    }
   }
 
   function submitWeeklyQuiz(userId: string, courseId: string, attempt: QuizAttempt) {
     updateLearningProgress(previous => {
       const current = previous.find(item => item.userId === userId && item.courseId === courseId) || getProgress(userId, courseId);
       const quizAttempts = [...current.quizAttempts.filter(item => item.quizId !== attempt.quizId), attempt];
-      const currentWeek = getCourseWeeks(courseId).find(item => item.quiz.id === attempt.quizId);
-      const assignment = currentWeek && current.assignmentSubmissions.find(item => item.submittedAt.startsWith(currentWeek.endsOn));
+      const currentWeek = getWeeksForCourse(courseId).find(item => item.quiz.id === attempt.quizId);
+      const assignment = currentWeek && current.assignmentSubmissions.find(item => item.weekNumber === currentWeek.weekNumber);
       const completedWeeks = currentWeek && attempt.passed && assignment
         ? Array.from(new Set([...current.completedWeeks, currentWeek.weekNumber]))
         : current.completedWeeks;
       const updated = { ...current, quizAttempts, completedWeeks };
       return [...previous.filter(item => !(item.userId === userId && item.courseId === courseId)), updated];
     });
+    if (isSupabaseConfigured && supabase) {
+      void supabase.from('quiz_attempts').insert({ quiz_id: attempt.quizId, user_id: userId, score: attempt.score, passed: attempt.passed, answers: attempt.answers });
+    }
   }
 
   function submitAssignment(userId: string, courseId: string, weekNumber: number, submission: AssignmentSubmission) {
     updateLearningProgress(previous => {
       const current = previous.find(item => item.userId === userId && item.courseId === courseId) || getProgress(userId, courseId);
-      const courseWeek = getCourseWeeks(courseId).find(item => item.weekNumber === weekNumber);
+      const courseWeek = getWeeksForCourse(courseId).find(item => item.weekNumber === weekNumber);
       const quiz = courseWeek && current.quizAttempts.find(item => item.quizId === courseWeek.quiz.id && item.passed);
       const completedWeeks = quiz ? Array.from(new Set([...current.completedWeeks, weekNumber])) : current.completedWeeks;
       const updated = { ...current, assignmentSubmissions: [...current.assignmentSubmissions.filter(item => item.submittedAt !== submission.submittedAt), submission], completedWeeks };
       return [...previous.filter(item => !(item.userId === userId && item.courseId === courseId)), updated];
     });
+    if (isSupabaseConfigured && supabase) {
+      const courseWeek = getWeeksForCourse(courseId).find(item => item.weekNumber === weekNumber);
+      if (courseWeek) void supabase.from('assignment_submissions').insert({ assignment_id: courseWeek.assignment.id, user_id: userId, response: submission.text });
+    }
   }
 
   function completeCourse(userId: string, courseId: string, finalScore: number) {
@@ -476,6 +594,7 @@ export function CapacityProvider({ children }: { children: ReactNode }) {
         customCourses,
         customCourseWeeks,
         createCourse,
+        registerCourseWeeks,
         getWeeksForCourse,
         workflowSteps,
         isLoopCompleted,

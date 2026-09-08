@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import { isSupabaseConfigured } from '../lib/supabase';
 import { StateEmblem } from '../components/ui/SharedComponents';
 import GovTopBar from '../components/layout/GovTopBar';
 import { Mail, Lock, ArrowRight, Eye, EyeOff, ShieldCheck, UserPlus, UserRound } from 'lucide-react';
@@ -36,46 +37,48 @@ const QUICK_LOGINS = [
 ];
 
 export default function LoginPage() {
-  const { login, register } = useAuth();
+  const { login, demoLogin, register, resetPassword } = useAuth();
   const navigate = useNavigate();
   const [mode, setMode] = useState<'login' | 'register'>('login');
   const [name, setName] = useState('');
   const [department, setDepartment] = useState('');
   const [position, setPosition] = useState('');
+  const [role, setRole] = useState<'learner' | 'manager'>('learner');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [email, setEmail] = useState('arjun@capacityconnect.in');
-  const [password, setPassword] = useState('demo123');
+  const [password, setPassword] = useState('');
   const [showPass, setShowPass] = useState(false);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
-  function handleSubmit(e: React.FormEvent) {
+  async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setLoading(true);
     setError('');
-    setTimeout(() => {
+    try {
       if (mode === 'register') {
         if (password !== confirmPassword) {
           setError('Passwords do not match.');
           setLoading(false);
           return;
         }
-        const result = register({ name, email, password, department, position });
+        const result = await register({ name, email, password, department, position, role });
         if (result.ok) {
-          navigate('/dashboard');
+          navigate(result.role === 'manager' ? '/manager' : '/dashboard');
         } else {
           setError(result.message || 'Unable to create account.');
         }
       } else {
-        const ok = login(email, password);
-        if (ok) {
-          navigate('/dashboard');
+        const result = await login(email, password);
+        if (result.ok) {
+          navigate(result.role === 'admin' ? '/admin' : result.role === 'manager' ? '/manager' : '/dashboard');
         } else {
-          setError('Invalid credentials. Use any demo email + password: demo123');
+          setError(result.message || 'Unable to sign in.');
         }
       }
+    } finally {
       setLoading(false);
-    }, 450);
+    }
   }
 
   function switchMode(nextMode: 'login' | 'register') {
@@ -86,7 +89,7 @@ export default function LoginPage() {
       setPassword('');
     } else {
       setEmail('arjun@capacityconnect.in');
-      setPassword('demo123');
+      setPassword('');
       setConfirmPassword('');
     }
   }
@@ -95,11 +98,21 @@ export default function LoginPage() {
     setEmail(em);
     setPassword('demo123');
     setLoading(true);
-    setTimeout(() => {
-      const ok = login(em, 'demo123');
-      if (ok) navigate('/dashboard');
+    void demoLogin(em).then(success => {
+      if (success) {
+        const destination = em === 'admin@capacityconnect.in' ? '/admin' : em === 'meera@capacityconnect.in' ? '/team' : '/dashboard';
+        navigate(destination);
+      } else setError('Demo persona is unavailable.');
       setLoading(false);
-    }, 200);
+    });
+  }
+
+  async function handleForgotPassword() {
+    if (!email.trim()) { setError('Enter your email address first.'); return; }
+    setLoading(true);
+    const result = await resetPassword(email);
+    setError(result.ok ? 'Password reset instructions sent if the account exists.' : result.message || 'Unable to send reset instructions.');
+    setLoading(false);
   }
 
   return (
@@ -264,6 +277,13 @@ export default function LoginPage() {
                       />
                     </div>
                   </div>
+                  <div>
+                    <label htmlFor="account-role" className="text-xs font-bold text-slate-700 mb-1.5 block">Account role</label>
+                    <select id="account-role" value={role} onChange={e => setRole(e.target.value as 'learner' | 'manager')} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm font-medium">
+                      <option value="learner">Learner</option>
+                      {!isSupabaseConfigured && <option value="manager">Manager (pending approval)</option>}
+                    </select>
+                  </div>
                 </>
               )}
 
@@ -287,13 +307,15 @@ export default function LoginPage() {
                   </>
                 )}
               </button>
+              {mode === 'login' && <button type="button" onClick={() => void handleForgotPassword()} className="w-full text-xs font-bold text-[#0b2545] hover:underline">Forgot password?</button>}
             </form>
 
             {/* Quick Demo Access Tiers */}
             {mode === 'login' && <div className="mt-8 pt-6 border-t border-slate-100">
               <p className="text-xs font-bold text-[#c69214] uppercase tracking-wider mb-3">
-                1-Click Demo Evaluation Personas
+                1-Click Presentation Demo Personas
               </p>
+              <p className="text-[11px] text-slate-500 mb-3">Demo mode uses clearly labelled sample data and does not create a Supabase session.</p>
               <div className="space-y-2">
                 {QUICK_LOGINS.map(q => (
                   <div
